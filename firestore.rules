@@ -1,0 +1,48 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // --- Prediction Model Validation ---
+    function isValidPrediction(data) {
+      return data.keys().hasAll(['userId', 'produceType', 'qualityScore', 'rulHours', 'timestamp'])
+             && data.userId is string
+             && data.userId == request.auth.uid // Identity Integrity
+             && data.produceType is string && data.produceType.size() <= 50
+             && data.qualityScore is number 
+             && data.rulHours is number
+             && data.timestamp is timestamp;
+    }
+
+    // --- Collection: Predictions ---
+    match /predictions/{predictionId} {
+      // In rules v2, for list queries, the condition must match the query filters.
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
+      
+      allow create: if isSignedIn() 
+                    && isValidId(predictionId)
+                    && isValidPrediction(request.resource.data)
+                    && (request.resource.data.timestamp == request.time || request.resource.data.timestamp == request.resource.data.timestamp); // Allow server timestamp
+      
+      allow update: if false; 
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+  }
+}

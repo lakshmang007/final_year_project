@@ -1,0 +1,26 @@
+{
+  "entities": {
+    "Prediction": {
+      "title": "Prediction Result",
+      "description": "Store individual produce freshness predictions",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "produceType": { "type": "string" },
+        "qualityScore": { "type": "number" },
+        "rulHours": { "type": "number" },
+        "temperatureK": { "type": "number" },
+        "humidity": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "imageUrl": { "type": "string" }
+      },
+      "required": ["userId", "produceType", "qualityScore", "rulHours", "timestamp"]
+    }
+  },
+  "firestore": {
+    "predictions": {
+      "schema": "Prediction",
+      "description": "A collection of all produce freshness predictions"
+    }
+  }
+}
