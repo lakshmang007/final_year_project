@@ -70,6 +70,31 @@ export const PRODUCE_DATA: Record<string, ProduceMetadata> = {
       'Vitamin B6': { value: 0.08, unit: 'mg' },
     }
   },
+  avocado: { 
+    A: 1.2e8, 
+    Ea: 60000, 
+    avgWeightG: 170,
+    nutrientsPer100g: {
+      'Monounsaturated Fats': { value: 9.8, unit: 'g' },
+      'Potassium': { value: 485, unit: 'mg' },
+      'Dietary Fiber': { value: 6.7, unit: 'g' },
+      'Vitamin E': { value: 2.07, unit: 'mg' },
+      'Vitamin K': { value: 21, unit: 'μg' },
+      'Folate': { value: 81, unit: 'μg' },
+    }
+  },
+  mango: { 
+    A: 1.5e8, 
+    Ea: 60000, 
+    avgWeightG: 200,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 36.4, unit: 'mg' },
+      'Vitamin A': { value: 54, unit: 'μg' },
+      'Dietary Fiber': { value: 1.6, unit: 'g' },
+      'Potassium': { value: 168, unit: 'mg' },
+      'Folate': { value: 43, unit: 'μg' },
+    }
+  },
   leafy_greens: { 
     A: 4.6e8, 
     Ea: 60000, 

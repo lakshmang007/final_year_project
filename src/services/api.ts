@@ -9,9 +9,26 @@ export interface PredictionResult {
 }
 
 export interface WeatherData {
+  temperature_celsius?: number;
   temperature_kelvin: number;
   humidity_percent: number;
+  moisture_content?: number;
+  soil_moisture?: number | null;
+  location_name?: string;
   source: string;
+}
+
+export interface ArchiveWeatherData {
+  type: string;
+  source: string;
+  latitude: number;
+  longitude: number;
+  hourly: {
+    time: string[];
+    temperature_2m: number[];
+    relative_humidity_2m?: number[];
+    soil_moisture_0_to_1cm?: number[];
+  };
 }
 
 // Initialize Gemini
@@ -31,17 +48,20 @@ export async function predictProduce(imageBase64: string): Promise<PredictionRes
     
     const textPart = {
       text: `Analyze this image of fresh produce with extreme biochemical precision.
-      1. Identify the specific type of produce. Pay intense attention to citrus differentiation:
-         - Orange: Typically spherical, saturated ORANGE skin, larger diameter (6-9cm), distinct textured "pith" skin.
-         - Lemon: Typically ellipsoidal/oval, bright YELLOW skin, smaller (5-7cm), often has a distinct "nipple" at one or both ends.
-         - Banana: Curved, yellow (or green), look for senescence spotting (brown dots).
-         - Tomato: Smooth red skin, spherical.
-         - Leafy Greens: Identify spinach, kale, or simple lettuce.
-      2. If multiple items are present, identify the most central or prominent one.
+      1. Identify the specific type of produce. Pay intense attention to key fruit distinctions:
+         - Avocado: Typically pear, egg, or dark oval-shaped with dark green to dark purple/black pebbled skin (e.g. Hass) or bright green smooth skin. Has a characteristic stem nub or textured, bumpy skin.
+         - Mango: Smooth, glossy, leathery skin, kidney/oval/oblong shaped, usually showing a blush/gradient of red, orange, yellow, and vibrant green. Smooth surface without dark pebbles/bumps.
+         - Banana: Curved, elongated, yellow or green skin, look for senescence spotting (brown dots).
+         - Tomato: Smooth red or reddish-yellow skin, spherical, green calyx/stem on top.
+         - Apple: Round, firm, shiny red/green/yellow skin with indented top/bottom stem cavity.
+         - Orange: Spherical, bright orange, textured porous citrus peel.
+         - Lemon: Ellipsoidal/oval, bright yellow skin, distinct nipple tips.
+         - Leafy Greens: Spinach, kale, lettuce leaves.
+      2. If multiple items are present, identify the most central or prominent produce item.
       3. Assign a quality score from 0.0 (rotten/severely decayed) to 1.0 (peak freshness/perfect). 
          - A quality score of 1.0 means it was likely harvested within 24-48 hours.
          - Deduct points for soft spots, bruising, wilting, mold, or discoloration.
-      Return ONLY a JSON object: {"produce_type": "string", "quality_score": float}. Use lowercase snake_case for produce_type.`,
+      Return ONLY a JSON object: {"produce_type": "string", "quality_score": float}. Use lowercase snake_case for produce_type (e.g., "avocado", "mango", "banana", "tomato", "apple", "orange", "lemon", "leafy_greens").`,
     };
 
     const response = await ai.models.generateContent({
@@ -62,8 +82,12 @@ export async function predictProduce(imageBase64: string): Promise<PredictionRes
   }
 }
 
-export async function fetchWeather(lat: number, lon: number): Promise<WeatherData> {
-  const response = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
+export async function fetchWeather(lat: number, lon: number, startDate?: string, endDate?: string): Promise<WeatherData> {
+  let url = `/api/weather?lat=${lat}&lon=${lon}`;
+  if (startDate && endDate) {
+    url += `&start_date=${startDate}&end_date=${endDate}`;
+  }
+  const response = await fetch(url);
   if (!response.ok) throw new Error('Weather fetch failed');
   return response.json();
 }

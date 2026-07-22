@@ -1,10 +1,11 @@
 {
-  "projectId": "seismic-bucksaw-455614-p8",
-  "appId": "1:769257919190:web:70379a3fa8dbefb2e5af77",
-  "apiKey": "AIzaSyA7UxmFW-BEcF8B61LCCwIXaLpUagdwxtI",
-  "authDomain": "seismic-bucksaw-455614-p8.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-8a735826-af09-41e5-96bd-b000cb478e7d",
-  "storageBucket": "seismic-bucksaw-455614-p8.firebasestorage.app",
-  "messagingSenderId": "769257919190",
-  "measurementId": ""
+  "projectId": "gen-lang-client-0979288524",
+  "appId": "1:238075004860:web:3e13877fd792f8f4268db9",
+  "apiKey": "AIzaSyCjyK4Neg2S1oUV5l0npOdpLlI3t7NbyBw",
+  "authDomain": "gen-lang-client-0979288524.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-biofreshcv-8a735826-af09-41e5-96bd-b000cb478e7d",
+  "storageBucket": "gen-lang-client-0979288524.firebasestorage.app",
+  "messagingSenderId": "238075004860",
+  "measurementId": "",
+  "oAuthClientId": "238075004860-o4njtm7m87oo9suvprrujsgvsc95acmu.apps.googleusercontent.com"
 }

@@ -58,6 +58,10 @@ export interface PredictionHistoryItem {
   humidity: number;
   timestamp: any;
   imageUrl?: string;
+  isCorrect?: boolean;
+  correctedType?: string;
+  alertEnabled?: boolean;
+  alertThreshold?: number; // Hours remaining to trigger alert
 }
 
 export async function savePrediction(data: Omit<PredictionHistoryItem, 'id' | 'timestamp' | 'userId'>) {
@@ -71,6 +75,19 @@ export async function savePrediction(data: Omit<PredictionHistoryItem, 'id' | 't
       timestamp: serverTimestamp(),
     });
     return docRef.id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function updatePrediction(id: string, data: Partial<Omit<PredictionHistoryItem, 'id' | 'timestamp' | 'userId'>>) {
+  if (!auth.currentUser) return;
+  
+  const path = `predictions/${id}`;
+  try {
+    const { doc, updateDoc } = await import('firebase/firestore');
+    const docRef = doc(db, 'predictions', id);
+    await updateDoc(docRef, data);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
