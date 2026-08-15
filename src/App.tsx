@@ -17,11 +17,13 @@ import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, Chev
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { auth, loginWithGoogle, loginAnonymously } from './lib/firebase';
-import { savePrediction, getHistory, updatePrediction, PredictionHistoryItem } from './services/history';
+import { savePrediction, getHistory, updatePrediction, deletePrediction, PredictionHistoryItem } from './services/history';
 import { predictProduce, fetchWeather, PredictionResult, WeatherData } from './services/api';
 import { calculateDecayRate, calculateRUL, getNutrientRetention, getFreshnessLabel, NutrientDetail } from './lib/science';
 import { getRecommendations, Recipe } from './lib/recipes';
 import { PipelineVisualizer } from './components/PipelineVisualizer';
+import { RAGKnowledgeAdvisor } from './components/RAGKnowledgeAdvisor';
+import { MLArchitectureVisualizer } from './components/MLArchitectureVisualizer';
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, Tooltip, Legend } from 'recharts';
 
 /**
@@ -372,6 +374,7 @@ export default function App() {
   const [alertEnabled, setAlertEnabled] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState<number>(12); // Alert when 12h left
   const [showThresholdPicker, setShowThresholdPicker] = useState(false);
+  const [resultActiveTab, setResultActiveTab] = useState<'overview' | 'pipeline' | 'rag' | 'ml'>('overview');
   
   // Environment State (Saved location, temperature, and moisture)
   const [homeWeather, setHomeWeather] = useState<WeatherData | null>(() => {
@@ -468,6 +471,15 @@ export default function App() {
       }
     }
   }, [user, authReady]);
+
+  /**
+   * Automatically refresh history whenever the user opens the History tab
+   */
+  useEffect(() => {
+    if (view === 'history' && user) {
+      loadHistory();
+    }
+  }, [view, user]);
 
   // --- Action Handlers ---
 
@@ -809,16 +821,38 @@ export default function App() {
       setRecipes(getRecommendations(predResult.produce_type, calculatedRul));
       
       // 4. Save to Firestore
+      const newScanItem: PredictionHistoryItem = {
+        userId: user?.uid || '',
+        produceType: predResult.produce_type,
+        qualityScore: predResult.quality_score,
+        rulHours: calculatedRul,
+        temperatureK: effectiveTempK,
+        humidity: weatherResult.humidity_percent,
+        imageUrl: imageData,
+        timestamp: new Date(),
+        isCorrect: true,
+      };
+
       const savedId = await savePrediction({
         produceType: predResult.produce_type,
         qualityScore: predResult.quality_score,
         rulHours: calculatedRul,
         temperatureK: effectiveTempK,
         humidity: weatherResult.humidity_percent,
-        imageUrl: imageData
+        imageUrl: imageData,
+        isCorrect: true
       });
 
-      if (savedId) setLastSavedId(savedId);
+      if (savedId) {
+        setLastSavedId(savedId);
+        newScanItem.id = savedId;
+      }
+
+      // Prepend to local history state immediately so user sees it without delay
+      setHistory(prev => [newScanItem, ...prev.filter(p => p.id !== savedId)]);
+      
+      // Refresh scan list from server
+      loadHistory();
 
       setView('result');
     } catch (err: any) {
@@ -1053,6 +1087,22 @@ export default function App() {
     setHistory(prev => prev.map(h => h.id === item.id ? updated : h));
     
     await updatePrediction(item.id, { alertThreshold: val });
+  };
+
+  /**
+   * handleDeleteHistoryItem
+   * 
+   * Deletes a scan record from Firestore and removes it from the local list.
+   */
+  const handleDeleteHistoryItem = async (item: PredictionHistoryItem) => {
+    if (!item.id) return;
+    try {
+      await deletePrediction(item.id);
+      setHistory(prev => prev.filter(h => h.id !== item.id));
+      setSelectedHistoryItem(null);
+    } catch (e) {
+      console.warn("Delete history item failed:", e);
+    }
   };
 
   return (
@@ -1377,148 +1427,117 @@ export default function App() {
           {view === 'result' && prediction && rul !== null && (
             <motion.div 
               key="result"
-              initial={{ opacity: 0, scale: 0.95 }}
+              initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
-              className="space-y-6"
+              transition={{ duration: 0.2 }}
+              className="space-y-6 max-w-xl mx-auto"
             >
-              <div className="bg-white rounded-3xl p-8 shadow-xl shadow-slate-200 border border-slate-100 flex flex-col items-center text-center space-y-4">
-                <div className="flex flex-col items-center gap-1 mb-2">
-                  <span className={`px-4 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+              {/* Primary Produce Freshness Hero Card */}
+              <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-100 flex flex-col items-center text-center relative overflow-hidden">
+                {/* Visual Status Indicator & Quality Score Badge */}
+                <div className="flex items-center justify-between w-full mb-3">
+                  <span className={`px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider border ${
                     rul > 48 
-                      ? 'bg-green-50 text-green-600 border-green-100' 
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200/60' 
                       : rul >= 24 
-                        ? 'bg-amber-50 text-[#D4860A] border-amber-100' 
-                        : 'bg-red-50 text-red-600 border-red-100'
+                        ? 'bg-amber-50 text-amber-700 border-amber-200/60' 
+                        : 'bg-rose-50 text-rose-700 border-rose-200/60'
                   }`}>
                     {getFreshnessLabel(rul).label}
                   </span>
-                  <div className="flex items-center gap-2 mt-2">
-                    <h2 className="text-2xl font-black text-slate-800 tracking-tight capitalize">
-                      {prediction.produce_type.replace('_', ' ')}
-                    </h2>
-                    {feedbackState === 'correct' && (
-                      <span className="text-xs bg-[#1AAB5F]/10 text-[#1AAB5F] border border-[#1AAB5F]/20 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1">
-                        ✓ Verified
-                      </span>
-                    )}
-                  </div>
-                  {nutrients && (
-                    <span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-2 py-0.5 rounded border border-slate-100 mt-1">
-                      EST. WEIGHT: {nutrients.weightG}g
+
+                  <span className="text-[11px] font-mono font-bold bg-slate-100 text-slate-600 px-2.5 py-0.5 rounded-full">
+                    Score: {(prediction.quality_score * 100).toFixed(0)}%
+                  </span>
+                </div>
+
+                {/* Produce Name & Verification Badge */}
+                <div className="flex items-center justify-center gap-2 mb-1">
+                  <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 tracking-tight capitalize">
+                    {prediction.produce_type.replace('_', ' ')}
+                  </h2>
+                  {feedbackState === 'correct' && (
+                    <span className="text-[11px] bg-emerald-50 text-emerald-700 border border-emerald-200/80 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+                      ✓ Verified
                     </span>
                   )}
                 </div>
-                <div className="relative">
-                   <div className="text-8xl font-light text-slate-800 tracking-tighter">
-                    {rul.toFixed(1)}
-                  </div>
-                  <div className="absolute top-2 -right-14 px-3 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-bold tracking-widest uppercase">
-                    hrs
-                  </div>
-                  <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-[#1AAB5F]/10 text-[#1AAB5F] px-4 py-1 rounded-full text-xs font-bold whitespace-nowrap">
-                    ≈ {(rul / 24).toFixed(1)} Days
-                  </div>
-                </div>
-                <p className="text-slate-400 text-xs font-bold uppercase tracking-widest pt-6">Remaining Useful Life</p>
 
-                {/* Produce Verification & Lookalike Suggestions Bar */}
-                <div className="w-full bg-slate-50/80 border border-slate-100 p-4 rounded-3xl space-y-3 text-left my-2">
-                  <div className="flex justify-between items-center text-xs font-bold uppercase tracking-wider text-slate-700">
-                    <span className="flex items-center gap-1.5">
-                      <AlertTriangle size={14} className="text-amber-500" />
-                      Verify Item / Lookalikes
+                {nutrients && (
+                  <span className="text-[11px] text-slate-400 font-medium">
+                    Estimated weight: <strong className="text-slate-600 font-semibold">{nutrients.weightG}g</strong>
+                  </span>
+                )}
+
+                {/* Big Hero Remaining Useful Life Number */}
+                <div className="my-6 relative flex flex-col items-center">
+                  <div className="flex items-baseline justify-center">
+                    <span className="text-7xl sm:text-8xl font-black text-slate-800 tracking-tighter">
+                      {rul.toFixed(1)}
                     </span>
-                    <span className="text-[10px] text-slate-400 normal-case font-medium">
-                      {feedbackState === 'correct' ? 'Verified item' : 'Tap to switch item'}
+                    <span className="text-sm sm:text-base font-bold text-slate-400 uppercase tracking-widest ml-1.5 font-mono">
+                      hrs
                     </span>
                   </div>
-
-                  {prediction.alternative_candidates && prediction.alternative_candidates.length > 0 && (
-                    <div className="p-3 bg-amber-50/90 border border-amber-200/60 rounded-2xl text-xs space-y-1.5">
-                      <p className="font-bold text-amber-900 flex items-center gap-1">
-                        <span>🔍 Similar produce candidates detected:</span>
-                      </p>
-                      <div className="flex flex-wrap gap-1.5 pt-1">
-                        {prediction.alternative_candidates.map(cand => (
-                          <button
-                            key={cand.type}
-                            onClick={() => handleCorrection(cand.type)}
-                            className="px-3 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-xl text-xs font-bold transition-all flex items-center gap-1 border border-amber-300/60 active:scale-95"
-                            title={cand.reason}
-                          >
-                            <span>{cand.label}</span>
-                            {cand.reason && <span className="text-[10px] text-amber-700/80">({cand.reason})</span>}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex flex-wrap gap-1.5">
-                    {[
-                      { type: 'avocado', label: '🥑 Avocado' },
-                      { type: 'mango', label: '🥭 Mango' },
-                      { type: 'banana', label: '🍌 Banana' },
-                      { type: 'apple', label: '🍎 Apple' },
-                      { type: 'tomato', label: '🍅 Tomato' },
-                      { type: 'orange', label: '🍊 Orange' },
-                      { type: 'lemon', label: '🍋 Lemon' },
-                      { type: 'leafy_greens', label: '🥬 Leafy Greens' },
-                      { type: 'papaya', label: '🍈 Papaya' },
-                      { type: 'lime', label: '🟢 Lime' },
-                      { type: 'cucumber', label: '🥒 Cucumber' }
-                    ].map(item => {
-                      const isSelected = prediction.produce_type === item.type;
-                      return (
-                        <button
-                          key={item.type}
-                          onClick={() => handleCorrection(item.type)}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1 ${
-                            isSelected
-                              ? 'bg-[#1AAB5F] text-white shadow-md shadow-green-100 ring-2 ring-[#1AAB5F]/20'
-                              : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:bg-slate-100 active:scale-95'
-                          }`}
-                        >
-                          <span>{item.label}</span>
-                          {isSelected && <span>✓</span>}
-                        </button>
-                      );
-                    })}
+                  <div className="mt-2 bg-teal-50 text-[#0097B2] border border-teal-100 px-3.5 py-1 rounded-full text-xs font-bold">
+                    ≈ {(rul / 24).toFixed(1)} Days Shelf Life
                   </div>
                 </div>
-                
-                {/* Alert & Feedback Actions */}
-                <div className="w-full space-y-3 pt-6">
-                  <div className="grid grid-cols-2 gap-3">
+
+                {/* Quick Quick Environmental Telemetry Ticker */}
+                <div className="grid grid-cols-3 gap-2 w-full pt-4 border-t border-slate-100 text-center">
+                  <div className="bg-slate-50/80 rounded-2xl p-2.5 border border-slate-100">
+                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Temp</span>
+                    <span className="text-sm font-bold text-slate-800">
+                      {weather?.temperature_kelvin ? (weather.temperature_kelvin - 273.15).toFixed(1) : '20.0'}°C
+                    </span>
+                  </div>
+                  <div className="bg-slate-50/80 rounded-2xl p-2.5 border border-slate-100">
+                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Humidity</span>
+                    <span className="text-sm font-bold text-slate-800">
+                      {weather?.humidity_percent || 60}%
+                    </span>
+                  </div>
+                  <div className="bg-slate-50/80 rounded-2xl p-2.5 border border-slate-100">
+                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Decay Rate</span>
+                    <span className="text-sm font-bold text-[#0097B2] font-mono">
+                      {(prediction.quality_score / Math.max(0.1, rul)).toFixed(4)}/h
+                    </span>
+                  </div>
+                </div>
+
+                {/* Notification & Verification Actions */}
+                <div className="w-full pt-4 space-y-2.5">
+                  <div className="grid grid-cols-2 gap-2">
                     <button 
                       onClick={toggleAlert}
-                      className={`flex items-center justify-center gap-2 py-3 rounded-2xl font-bold text-xs transition-all ${
+                      className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl font-bold text-xs transition-all border ${
                         alertEnabled 
-                          ? 'bg-[#0097B2] text-white shadow-lg shadow-cyan-100' 
-                          : 'bg-slate-50 text-slate-600 border border-slate-100 hover:bg-slate-100'
+                          ? 'bg-[#0097B2] text-white border-[#0097B2] shadow-xs' 
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
                       }`}
                     >
-                      <Bell size={16} fill={alertEnabled ? "currentColor" : "none"} />
-                      {alertEnabled ? "Alert Set" : "Notify Me"}
+                      <Bell size={14} fill={alertEnabled ? "currentColor" : "none"} />
+                      <span>{alertEnabled ? "Alert Set" : "Notify Me"}</span>
                     </button>
                     <button 
                       onClick={() => handleFeedback(true)}
                       disabled={feedbackState !== 'none'}
-                      className={`flex items-center justify-center gap-2 py-3 rounded-2xl font-bold text-xs transition-all ${
+                      className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl font-bold text-xs transition-all border ${
                         feedbackState === 'correct'
-                          ? 'bg-[#1AAB5F] text-white'
-                          : 'bg-slate-50 text-slate-600 border border-slate-100 hover:bg-slate-100'
+                          ? 'bg-[#1AAB5F] text-white border-[#1AAB5F]'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
                       }`}
                     >
-                      <ThumbsUp size={16} />
-                      {feedbackState === 'correct' ? "Verified" : "Correct"}
+                      <ThumbsUp size={14} />
+                      <span>{feedbackState === 'correct' ? "Verified" : "Confirm"}</span>
                     </button>
                   </div>
 
                   {alertEnabled && (
-                    <div className="p-4 bg-[#0097B2]/5 border border-[#0097B2]/10 rounded-2xl space-y-3">
-                      <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-widest text-[#0097B2]">
-                        <span className="flex items-center gap-2"><Clock size={12} /> Expiry Reminder</span>
+                    <div className="p-3 bg-teal-50/60 border border-teal-100 rounded-2xl space-y-2 text-left">
+                      <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-wider text-[#0097B2]">
+                        <span className="flex items-center gap-1"><Clock size={11} /> Expiry Reminder</span>
                         <span>{alertThreshold}h remaining</span>
                       </div>
                       <input 
@@ -1530,135 +1549,182 @@ export default function App() {
                         onChange={(e) => updateAlertThreshold(parseInt(e.target.value))}
                         className="w-full h-1.5 bg-[#0097B2]/20 rounded-full appearance-none cursor-pointer accent-[#0097B2]"
                       />
-                      <p className="text-[10px] text-slate-400 text-center font-bold">
-                        We'll alert you when this item has {alertThreshold} hours left.
-                      </p>
+                    </div>
+                  )}
+
+                  {feedbackState === 'none' && !showCorrection && (
+                    <button 
+                      onClick={() => setShowCorrection(true)}
+                      className="text-[11px] font-bold text-slate-400 hover:text-slate-600 transition-colors flex items-center justify-center gap-1 mx-auto pt-1"
+                    >
+                      <span>Incorrect item? Tap to change</span>
+                    </button>
+                  )}
+
+                  {/* Clean Correction Picker */}
+                  {showCorrection && (
+                    <div className="w-full pt-2 space-y-2 text-left bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                      <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                        <span>Select correct produce</span>
+                        <button onClick={() => setShowCorrection(false)} className="text-slate-400 hover:text-slate-600">Close</button>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {[
+                          { type: 'banana', label: '🍌 Banana' },
+                          { type: 'avocado', label: '🥑 Avocado' },
+                          { type: 'apple', label: '🍎 Apple' },
+                          { type: 'tomato', label: '🍅 Tomato' },
+                          { type: 'orange', label: '🍊 Orange' },
+                          { type: 'lemon', label: '🍋 Lemon' },
+                          { type: 'mango', label: '🥭 Mango' },
+                          { type: 'leafy_greens', label: '🥬 Leafy Greens' },
+                          { type: 'papaya', label: '🍈 Papaya' },
+                          { type: 'lime', label: '🟢 Lime' },
+                          { type: 'cucumber', label: '🥒 Cucumber' }
+                        ].map(item => (
+                          <button
+                            key={item.type}
+                            onClick={() => {
+                              handleCorrection(item.type);
+                              setShowCorrection(false);
+                            }}
+                            className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 transition-all"
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
+              </div>
 
-                {feedbackState === 'none' && (
-                  <button 
-                    onClick={() => handleFeedback(false)}
-                    className="mt-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest hover:text-red-500 transition-colors flex items-center gap-1"
+              {/* Segmented Navigation Tabs to Keep UI Clean & Organized */}
+              <div className="grid grid-cols-4 gap-1.5 p-1 bg-slate-100/80 rounded-2xl border border-slate-200/60">
+                {[
+                  { id: 'overview', label: 'Nutrition' },
+                  { id: 'rag', label: 'Advisor' },
+                  { id: 'pipeline', label: 'Vision' },
+                  { id: 'ml', label: 'ML Stack' },
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setResultActiveTab(tab.id as any)}
+                    className={`py-2 px-1 rounded-xl text-xs font-bold transition-all text-center ${
+                      resultActiveTab === tab.id
+                        ? 'bg-white text-slate-800 shadow-xs border border-slate-200/80'
+                        : 'text-slate-500 hover:text-slate-800'
+                    }`}
                   >
-                    <ThumbsDown size={12} /> Identification is wrong
+                    {tab.label}
                   </button>
-                )}
+                ))}
+              </div>
 
-                {/* Correction Picker */}
-                {showCorrection && (
-                  <div className="w-full pt-6 space-y-4">
-                    <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
-                      <AlertTriangle size={14} className="text-amber-500" /> What was it?
+              {/* TAB 1: NUTRITION & RECIPES OVERVIEW */}
+              {resultActiveTab === 'overview' && (
+                <div className="space-y-4">
+                  {/* Nutritional Breakdown Card */}
+                  <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                        <Info size={14} className="text-[#0097B2]" /> Nutritional Index
+                      </h3>
+                      <span className="text-[10px] font-mono text-slate-400 uppercase">Estimated Retention</span>
                     </div>
-                    <div className="grid grid-cols-4 gap-2">
-                      {['avocado', 'mango', 'banana', 'tomato', 'apple', 'orange', 'lemon', 'leafy_greens'].map(type => (
-                        <button 
-                          key={type}
-                          onClick={() => handleCorrection(type)}
-                          className="p-2.5 bg-slate-50 rounded-2xl border border-slate-100 text-[10px] font-bold uppercase tracking-tight hover:bg-[#1AAB5F]/5 hover:border-[#1AAB5F]/20 transition-all capitalize"
-                        >
-                          {type.replace('_', ' ')}
-                        </button>
+
+                    <div className="space-y-3">
+                      {nutrients?.nutrients.map(n => (
+                        <div key={n.name} className="space-y-1">
+                          <div className="flex justify-between items-center text-xs">
+                            <span className="text-slate-700 font-semibold">{n.name}</span>
+                            <span className="text-slate-500 font-mono text-[11px]">
+                              {n.currentValue.toFixed(1)}{n.unit} / {n.baseValue.toFixed(1)}{n.unit}
+                            </span>
+                          </div>
+                          <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${Math.min(100, Math.max(5, n.percentage))}%` }}
+                              className={`h-full rounded-full ${n.percentage > 80 ? 'bg-[#1AAB5F]' : n.percentage > 50 ? 'bg-amber-500' : 'bg-rose-500'}`}
+                            />
+                          </div>
+                        </div>
                       ))}
                     </div>
                   </div>
-                )}
-                
-                <div className="grid grid-cols-3 gap-3 w-full pt-8 mt-4 border-t border-slate-50">
-                  <div className="flex flex-col items-center gap-1">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Temperature</span>
-                    <span className="text-lg font-bold text-[#0097B2]">{(weather?.temperature_kelvin ? (weather.temperature_kelvin - 273.15).toFixed(1) : 0)}°C</span>
-                  </div>
-                  <div className="flex flex-col items-center gap-1">
-                     <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Moisture</span>
-                    <span className="text-lg font-bold text-[#0097B2]">{weather?.humidity_percent}%</span>
-                  </div>
-                  <div className="flex flex-col items-center gap-1">
-                     <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Soil Moisture</span>
-                    <span className="text-lg font-bold text-[#1AAB5F]">{weather?.soil_moisture !== undefined && weather?.soil_moisture !== null ? `${weather.soil_moisture} m³/m³` : 'Standard'}</span>
-                  </div>
-                </div>
-              </div>
 
-              {/* Visual Step-by-Step AI & Science Pipeline Breakdown */}
-              <PipelineVisualizer 
-                imageUrl={currentImage}
-                produceType={prediction.produce_type}
-                qualityScore={prediction.quality_score}
-                temperatureK={weather?.temperature_kelvin || 293.15}
-                humidity={weather?.humidity_percent || 60}
-                rulHours={rul}
-                confidence={prediction.confidence_score || 0.94}
-              />
-
-              <div className="bg-white rounded-4xl p-8 shadow-sm border border-slate-100 space-y-6">
-                <div className="flex justify-between items-end">
-                  <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
-                    <Info size={12} /> Nutritional Index (Approximate)
-                  </h3>
-                  <span className="text-[10px] font-bold text-slate-400 tracking-tighter uppercase font-mono">Estimated Content</span>
-                </div>
-                <div className="space-y-4">
-                  {nutrients?.nutrients.map(n => (
-                    <div key={n.name} className="space-y-1.5">
-                      <div className="flex justify-between items-center text-[10px] font-bold">
-                        <span className="text-slate-600 uppercase tracking-tight">{n.name}</span>
-                        <div className="flex items-center gap-2">
-                          <span className="text-slate-700 font-bold">
-                            {n.currentValue.toFixed(n.unit === 'mg' || n.unit === 'g' ? 1 : 0)}{n.unit}
-                          </span>
-                          <span className="text-slate-400 font-normal">
-                            / {n.baseValue.toFixed(n.unit === 'mg' || n.unit === 'g' ? 1 : 0)}{n.unit}
-                          </span>
-                        </div>
+                  {/* Waste Minimization Recipes */}
+                  {recipes.length > 0 && (
+                    <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 space-y-3">
+                      <div className="flex justify-between items-center">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                          Zero-Waste Kitchen Rescue
+                        </h3>
+                        <span className="text-[10px] text-slate-400 font-medium font-mono">RUL &lt; 24h Trigger</span>
                       </div>
-                      <div className="h-1.5 w-full bg-slate-50 rounded-full overflow-hidden border border-slate-100/50">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${Math.min(100, Math.max(5, n.percentage))}%` }}
-                          className={`h-full rounded-full ${n.percentage > 80 ? 'bg-[#1AAB5F]' : n.percentage > 50 ? 'bg-amber-500' : 'bg-red-500'}`}
-                        />
+
+                      <div className="space-y-2">
+                        {recipes.map(recipe => (
+                          <div key={recipe.id} className="p-3.5 bg-slate-50/80 rounded-2xl border border-slate-100 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                            <div className="flex items-center gap-3">
+                              <span className="text-xl">
+                                {recipe.name.includes('Bread') ? '🍞' : recipe.name.includes('Smoothie') ? '🥤' : '🥞'}
+                              </span>
+                              <div>
+                                <h5 className="font-bold text-xs text-slate-800">{recipe.name}</h5>
+                                <p className="text-[10px] text-slate-400">High Nutri-Conversion • 15m Prep</p>
+                              </div>
+                            </div>
+                            <ChevronRight size={16} className="text-slate-300" />
+                          </div>
+                        ))}
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              {recipes.length > 0 && (
-                <div className="space-y-6">
-                  <div className="flex justify-between items-center">
-                    <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
-                      Waste Minimization
-                    </h3>
-                    <span className="text-[10px] text-slate-400 font-medium italic">RUL &lt; 24h Trigger</span>
-                  </div>
-                  <div className="grid grid-cols-1 gap-4">
-                    {recipes.map(recipe => (
-                      <div key={recipe.id} className="group cursor-pointer p-5 bg-white rounded-4xl border border-slate-100 hover:border-[#1AAB5F30] transition-all flex items-center justify-between shadow-sm">
-                        <div className="flex items-center gap-4">
-                          <div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center text-2xl shadow-inner group-hover:scale-110 transition-transform">
-                            {recipe.name.includes('Bread') ? '🍞' : recipe.name.includes('Smoothie') ? '🥤' : '🥞'}
-                          </div>
-                          <div>
-                            <h5 className="font-bold text-slate-800 leading-tight">{recipe.name}</h5>
-                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter mt-0.5">High Nutri-Conversion • Prep: 15m</p>
-                          </div>
-                        </div>
-                        <ChevronRight size={20} className="text-slate-200 group-hover:text-[#1AAB5F] transition-colors" />
-                      </div>
-                    ))}
-                  </div>
+                  )}
                 </div>
               )}
 
+              {/* TAB 2: RAG KNOWLEDGE ADVISOR */}
+              {resultActiveTab === 'rag' && (
+                <RAGKnowledgeAdvisor 
+                  produceType={prediction.produce_type}
+                  qualityScore={prediction.quality_score}
+                  rulHours={rul}
+                />
+              )}
+
+              {/* TAB 3: STEP-BY-STEP COMPUTER VISION PIPELINE */}
+              {resultActiveTab === 'pipeline' && (
+                <PipelineVisualizer 
+                  imageUrl={currentImage}
+                  produceType={prediction.produce_type}
+                  qualityScore={prediction.quality_score}
+                  temperatureK={weather?.temperature_kelvin || 293.15}
+                  humidity={weather?.humidity_percent || 60}
+                  rulHours={rul}
+                  confidence={prediction.confidence_score || 0.94}
+                />
+              )}
+
+              {/* TAB 4: PYTORCH, CUDA, BF16 & XGBOOST ML ENGINE */}
+              {resultActiveTab === 'ml' && (
+                <MLArchitectureVisualizer 
+                  produceType={prediction.produce_type}
+                  qualityScore={prediction.quality_score}
+                  temperatureK={weather?.temperature_kelvin || 293.15}
+                  humidity={weather?.humidity_percent || 60}
+                  rulHours={rul}
+                />
+              )}
+
+              {/* Global Discard / New Scan Button */}
               <button 
                 onClick={reset}
-                className="w-full py-5 rounded-full border border-slate-200 text-slate-400 font-bold text-sm hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+                className="w-full py-4 rounded-2xl border border-slate-200 bg-white text-slate-500 hover:text-slate-800 hover:bg-slate-50 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-2xs"
               >
-                <RefreshCw size={18} /> Discard Scan
+                <RefreshCw size={15} /> Discard & Start New Scan
               </button>
             </motion.div>
           )}
@@ -1672,24 +1738,56 @@ export default function App() {
                className="space-y-6"
              >
                <div className="flex items-center justify-between">
-                 <h2 className="text-2xl font-bold">Scan History</h2>
-                 <button onClick={() => setView('home')} className="text-slate-400 hover:text-slate-600">
-                   <X />
-                 </button>
+                 <div className="flex items-center gap-2.5">
+                   <h2 className="text-2xl font-bold text-slate-800">Scan History</h2>
+                   {history.length > 0 && (
+                     <span className="px-2.5 py-0.5 bg-[#1AAB5F]/10 text-[#1AAB5F] border border-[#1AAB5F]/20 text-xs font-bold rounded-full">
+                       {history.length}
+                     </span>
+                   )}
+                 </div>
+                 
+                 <div className="flex items-center gap-2">
+                   <button 
+                     onClick={() => loadHistory()} 
+                     disabled={fetchingHistory}
+                     className="p-2 bg-white rounded-full border border-slate-200 text-slate-500 hover:text-[#1AAB5F] hover:border-[#1AAB5F]/30 transition-all active:scale-95 shadow-xs flex items-center justify-center"
+                     title="Refresh history from Firestore"
+                   >
+                     <RefreshCw size={18} className={fetchingHistory ? "animate-spin text-[#1AAB5F]" : ""} />
+                   </button>
+                   <button 
+                     onClick={() => setView('home')} 
+                     className="p-2 bg-white rounded-full border border-slate-200 text-slate-400 hover:text-slate-600 transition-all active:scale-95 shadow-xs"
+                   >
+                     <X size={18} />
+                   </button>
+                 </div>
+               </div>
+
+               {/* Firestore Sync & User Banner */}
+               <div className="p-3 bg-white border border-slate-100 rounded-2xl flex items-center justify-between text-xs text-slate-500 shadow-xs">
+                 <div className="flex items-center gap-2">
+                   <div className="w-2 h-2 rounded-full bg-[#1AAB5F] animate-pulse" />
+                   <span className="font-semibold text-slate-700">Firestore Cloud Sync</span>
+                 </div>
+                 <span className="text-[11px] bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100 font-medium">
+                   {user?.isAnonymous ? '👤 Guest Session' : user?.email ? `✉️ ${user.email}` : 'Connected'}
+                 </span>
                </div>
 
                {fetchingHistory ? (
                  <div className="flex flex-col items-center justify-center py-20 gap-4">
-                   <Loader2 size={48} className="animate-spin text-teal-500" />
-                   <p className="text-sm text-slate-400 font-medium">Fetching your freshness history...</p>
+                   <Loader2 size={48} className="animate-spin text-[#1AAB5F]" />
+                   <p className="text-sm text-slate-400 font-medium">Fetching your freshness history from Firestore...</p>
                  </div>
                ) : history.length > 0 ? (
                  <div className="space-y-4">
                    {history.map(item => (
                      <button 
-                       key={item.id} 
+                       key={item.id || item.timestamp.toString()} 
                        onClick={() => openHistoryItem(item)}
-                       className="w-full text-left bg-white p-5 rounded-4xl border border-slate-100 shadow-sm flex items-center gap-4 hover:border-[#1AAB5F20] transition-all hover:scale-[1.01] active:scale-[0.99]"
+                       className="w-full text-left bg-white p-5 rounded-4xl border border-slate-100 shadow-sm flex items-center gap-4 hover:border-[#1AAB5F]/30 transition-all hover:scale-[1.01] active:scale-[0.99] group"
                      >
                        <div className="w-16 h-16 rounded-2xl bg-slate-50 flex-shrink-0 overflow-hidden border border-slate-100 shadow-inner flex items-center justify-center relative">
                          {item.imageUrl ? (
@@ -1707,8 +1805,8 @@ export default function App() {
                        </div>
                        <div className="flex-1 min-w-0">
                          <div className="flex items-center justify-between">
-                           <h4 className="font-bold text-slate-800 capitalize truncate">{item.produceType.replace('_', ' ')}</h4>
-                           <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">{new Date(item.timestamp).toLocaleDateString()}</span>
+                           <h4 className="font-bold text-slate-800 capitalize truncate group-hover:text-[#1AAB5F] transition-colors">{item.produceType.replace('_', ' ')}</h4>
+                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{new Date(item.timestamp).toLocaleDateString()}</span>
                          </div>
                          <div className="flex items-center gap-4 mt-2">
                            <div className="flex items-center gap-1.5 text-[#1AAB5F]">
@@ -1723,17 +1821,25 @@ export default function App() {
                            </div>
                          </div>
                        </div>
-                       <ChevronRight size={18} className="text-slate-200" />
+                       <ChevronRight size={18} className="text-slate-300 group-hover:text-[#1AAB5F] group-hover:translate-x-0.5 transition-all" />
                      </button>
                    ))}
                  </div>
                ) : (
-                 <div className="bg-white rounded-4xl p-16 flex flex-col items-center justify-center text-center space-y-4 border border-slate-100 text-slate-300">
-                   <HistoryIcon size={48} className="text-slate-100" strokeWidth={1} />
-                   <div className="space-y-1">
-                    <p className="font-bold text-slate-600">Archive Empty</p>
-                    <p className="text-xs font-medium">Your freshness telemetry will appear here.</p>
+                 <div className="bg-white rounded-4xl p-12 flex flex-col items-center justify-center text-center space-y-4 border border-slate-100 shadow-sm">
+                   <div className="w-16 h-16 rounded-full bg-slate-50 flex items-center justify-center text-slate-300">
+                     <HistoryIcon size={32} strokeWidth={1.5} />
                    </div>
+                   <div className="space-y-1">
+                    <p className="font-bold text-slate-700">No Past Scans Yet</p>
+                    <p className="text-xs text-slate-400 max-w-xs">Take a photo of any fruit or vegetable to calculate its shelf life and store it in your archive.</p>
+                   </div>
+                   <button 
+                     onClick={startScanner}
+                     className="mt-2 px-6 py-2.5 bg-[#1AAB5F] text-white font-bold text-xs rounded-full shadow-md shadow-green-100 hover:bg-[#159451] transition-all flex items-center gap-2 active:scale-95"
+                   >
+                     <Camera size={16} /> Scan Produce Now
+                   </button>
                  </div>
                )}
              </motion.div>
@@ -1886,12 +1992,21 @@ export default function App() {
                 </div>
               </div>
 
-              <button 
-                onClick={() => setSelectedHistoryItem(null)}
-                className="w-full py-5 rounded-full bg-slate-800 text-white font-bold text-sm hover:bg-slate-900 transition-colors"
-              >
-                Close Details
-              </button>
+              <div className="flex gap-3 pt-2">
+                <button 
+                  onClick={() => handleDeleteHistoryItem(selectedHistoryItem)}
+                  className="px-5 py-4 rounded-full border border-red-200 text-red-600 hover:bg-red-50 font-bold text-sm transition-colors flex items-center justify-center gap-2"
+                  title="Delete this scan from history"
+                >
+                  <Trash2 size={16} /> Delete
+                </button>
+                <button 
+                  onClick={() => setSelectedHistoryItem(null)}
+                  className="flex-1 py-4 rounded-full bg-slate-800 text-white font-bold text-sm hover:bg-slate-900 transition-colors"
+                >
+                  Close Details
+                </button>
+              </div>
             </div>
           </motion.div>
         )}
