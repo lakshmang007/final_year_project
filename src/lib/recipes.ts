@@ -1,10 +1,21 @@
+/**
+ * Waste Reduction Recipe Recommendations
+ * 
+ * In simple words:
+ * When produce has less than 24 hours left before expiring (near-expiry),
+ * we suggest delicious zero-waste recipes (like banana bread or smoothies)
+ * so the user eats it before it goes bad!
+ */
+
+// Structure of a recipe recommendation
 export interface Recipe {
-  id: string;
-  name: string;
-  description: string;
-  ingredients: string[];
+  id: string; // Unique recipe ID
+  name: string; // Title of the dish (e.g. 'Overripe Banana Bread')
+  description: string; // Quick note on why it's great for aging produce
+  ingredients: string[]; // List of ingredients needed
 }
 
+// Database of delicious ways to rescue near-expiry produce
 export const RECIPE_DB: Record<string, Recipe[]> = {
   banana: [
     {
@@ -84,6 +95,13 @@ export const RECIPE_DB: Record<string, Recipe[]> = {
   ],
 };
 
+/**
+ * getRecommendations
+ * 
+ * If produce has less than 24 hours left (rulHours < 24),
+ * this returns recipes matching that fruit/vegetable.
+ * If it's still fresh (> 24h), no urgent recipes are needed so it returns empty.
+ */
 export function getRecommendations(produceType: string, rulHours: number): Recipe[] {
   if (rulHours >= 24) return [];
   const type = produceType.toLowerCase();

@@ -1,14 +1,21 @@
 /**
  * Arrhenius Engine and Science Logic for BioFresh-CV
+ * 
+ * In simple words:
+ * Fruits and veggies rot faster when it's warm and slower in the fridge!
+ * We use the famous "Arrhenius Equation" from chemistry to calculate the exact decay speed (k)
+ * based on the storage temperature, and then calculate how many hours the produce has left.
  */
 
+// Structure storing the chemistry constants and baseline vitamins for each fruit/veggie
 export interface ProduceMetadata {
-  A: number;
-  Ea: number;
-  avgWeightG: number;
-  nutrientsPer100g: Record<string, { value: number; unit: string }>;
+  A: number; // Pre-exponential factor (frequency of chemical reactions per hour)
+  Ea: number; // Activation energy in J/mol (energy barrier needed for decay reactions)
+  avgWeightG: number; // Typical weight of one whole fruit/vegetable in grams
+  nutrientsPer100g: Record<string, { value: number; unit: string }>; // Vitamin/mineral content in 100g
 }
 
+// Database of specific fruits & vegetables with their scientific constants & healthy nutrients
 export const PRODUCE_DATA: Record<string, ProduceMetadata> = {
   banana: { 
     A: 2.0e8, 
@@ -108,8 +115,43 @@ export const PRODUCE_DATA: Record<string, ProduceMetadata> = {
       'Calcium': { value: 99, unit: 'mg' },
     }
   },
+  papaya: {
+    A: 1.4e8,
+    Ea: 60000,
+    avgWeightG: 300,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 60.9, unit: 'mg' },
+      'Vitamin A': { value: 47, unit: 'μg' },
+      'Folate': { value: 37, unit: 'μg' },
+      'Papain Enzyme': { value: 1.2, unit: 'mg' },
+      'Dietary Fiber': { value: 1.7, unit: 'g' },
+    }
+  },
+  lime: {
+    A: 1.1e8,
+    Ea: 60000,
+    avgWeightG: 67,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 29.1, unit: 'mg' },
+      'Citric Acid': { value: 4.0, unit: 'g' },
+      'Potassium': { value: 102, unit: 'mg' },
+      'Flavonoids': { value: 18, unit: 'mg' },
+    }
+  },
+  cucumber: {
+    A: 2.5e8,
+    Ea: 60000,
+    avgWeightG: 200,
+    nutrientsPer100g: {
+      'Water Content': { value: 95.2, unit: 'g' },
+      'Vitamin K': { value: 16.4, unit: 'μg' },
+      'Potassium': { value: 147, unit: 'mg' },
+      'Cucurbitacins': { value: 0.8, unit: 'mg' },
+    }
+  }
 };
 
+// Fallback values used if a generic or unlisted produce item is scanned
 const DEFAULT_DATA: ProduceMetadata = { 
   A: 1.3e8, 
   Ea: 60000, 
@@ -122,17 +164,36 @@ const DEFAULT_DATA: ProduceMetadata = {
   }
 };
 
+/**
+ * calculateDecayRate
+ * 
+ * Calculates reaction rate constant (k) using Arrhenius Law:
+ *   k = A * e^(-Ea / (R * T))
+ * 
+ * Simple explanation:
+ * - Higher temperature (T in Kelvin) makes k bigger (spoilage happens faster).
+ * - Lower temperature (like in a fridge at 4°C) makes k smaller (spoilage slows down).
+ */
 export function calculateDecayRate(type: string, temperatureK: number): number {
   const metadata = PRODUCE_DATA[type.toLowerCase()] || DEFAULT_DATA;
-  const R = 8.314;
+  const R = 8.314; // Universal gas constant in J/(mol·K)
   return metadata.A * Math.exp(-metadata.Ea / (R * temperatureK));
 }
 
+/**
+ * calculateRUL (Remaining Useful Life)
+ * 
+ * Takes the visual quality score (0.0 to 1.0) and divides by decay rate (k)
+ * to return remaining hours of shelf life.
+ * 
+ * Example: Quality 0.8 / decay speed 0.01 = 80 hours left!
+ */
 export function calculateRUL(qualityScore: number, k: number): number {
   if (k <= 0) return 999;
   return qualityScore / k;
 }
 
+// Format for showing a specific nutrient in the UI
 export interface NutrientDetail {
   name: string;
   currentValue: number;
@@ -149,15 +210,22 @@ const NUTRIENT_DECAY_RATES: Record<string, number> = {
   'Antioxidants': 0.002,
 };
 
+/**
+ * getNutrientRetention
+ * 
+ * Estimates how many vitamins and minerals are still present in the fruit/vegetable.
+ * - Fragile vitamins (like Vitamin C and Folate) drop quickly when produce ripens or ages.
+ * - Stable minerals (like Potassium and Iron) stay intact much longer.
+ */
 export function getNutrientRetention(type: string, qualityScore: number): { weightG: number; nutrients: NutrientDetail[] } {
   const metadata = PRODUCE_DATA[type.toLowerCase()] || DEFAULT_DATA;
   
   const results: NutrientDetail[] = [];
   
-  // Coefficients that define how sensitively nutrients drop compared to visual quality
-  // 1.0 means they drop at the same rate. 
-  // < 1.0 means they drop SLOWER than visual decay (e.g. minerals)
-  // > 1.0 means they drop FASTER than visual decay (e.g. volatile vit C)
+  // Coefficients that define how sensitively nutrients drop compared to visual quality:
+  // - 1.0 means they drop at the exact same rate as visual freshness.
+  // - < 1.0 means they drop SLOWER than visual decay (e.g. minerals like Potassium).
+  // - > 1.0 means they drop FASTER than visual decay (e.g. volatile Vitamin C).
   const NUTRIENT_SENSITIVITY: Record<string, number> = {
     'Vitamin C': 1.3,
     'Folate': 1.2,
@@ -180,11 +248,10 @@ export function getNutrientRetention(type: string, qualityScore: number): { weig
   Object.entries(metadata.nutrientsPer100g).forEach(([name, data]) => {
     const sensitivity = NUTRIENT_SENSITIVITY[name] || 1.0;
     
-    // We use a power function to model nutrient retention relative to quality score
-    // Factor = qualityScore ^ sensitivity
+    // We use a power curve: Factor = qualityScore ^ sensitivity
     const factor = Math.pow(qualityScore, sensitivity);
     
-    // Per item calculation (based on average weight)
+    // Calculate total mg/g per whole fruit based on its average gram weight
     const baseValue = (data.value * metadata.avgWeightG) / 100;
     const currentValue = baseValue * factor;
     
@@ -203,6 +270,12 @@ export function getNutrientRetention(type: string, qualityScore: number): { weig
   };
 }
 
+/**
+ * getFreshnessLabel
+ * 
+ * Returns a friendly text badge ('Fresh', 'Near-Expiry', 'Overripe')
+ * and color styling based on how many hours are left.
+ */
 export function getFreshnessLabel(rulHours: number): { label: string; color: string } {
   if (rulHours > 48) return { label: 'Fresh', color: 'text-green-500' };
   if (rulHours >= 24) return { label: 'Near-Expiry', color: 'text-amber-500' };

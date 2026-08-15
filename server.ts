@@ -1,20 +1,39 @@
+/**
+ * Backend Web Server (Node.js + Express + Vite)
+ * 
+ * In simple words:
+ * This server runs behind the scenes to:
+ * 1. Serve the frontend React website.
+ * 2. Fetch live weather & moisture telemetry for the user's location via Open-Meteo.
+ * 3. Reverse-geocode coordinates into readable city names using OpenStreetMap Nominatim.
+ */
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import dotenv from "dotenv";
 
+// Load environment variables from .env file
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
 
+// Allow accepting large image payloads (up to 10 megabytes)
 app.use(express.json({ limit: '10mb' }));
 
-// API Routes
+/**
+ * Health check endpoint - used to verify the backend server is running smoothly
+ */
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+/**
+ * GET /api/weather
+ * 
+ * Fetches real-time ambient weather (temperature in Celsius and Kelvin, humidity, soil moisture)
+ * based on the provided latitude and longitude.
+ */
 app.get("/api/weather", async (req, res) => {
   try {
     const { lat, lon, start_date, end_date } = req.query;
@@ -47,7 +66,7 @@ app.get("/api/weather", async (req, res) => {
     const humidityPercent = openMeteoData.current?.relative_humidity_2m ?? 60;
     const soilMoisture = openMeteoData.current?.soil_moisture_0_to_1cm ?? null;
 
-    // Optional reverse geocoding for city name
+    // Optional reverse geocoding to find city / neighborhood name
     let locationName = `Lat: ${Number(lat).toFixed(2)}, Lon: ${Number(lon).toFixed(2)}`;
     try {
       const geoRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=10`, {
@@ -60,7 +79,7 @@ app.get("/api/weather", async (req, res) => {
         }
       }
     } catch {
-      // fallback to coordinates format
+      // If geocoding fails, fallback gracefully to coordinate string
     }
 
     res.json({
@@ -78,14 +97,21 @@ app.get("/api/weather", async (req, res) => {
   }
 });
 
+/**
+ * startServer
+ * 
+ * Boots up the Express web server and attaches Vite development middleware.
+ */
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    // In development: Vite handles live bundling
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
+    // In production: serve static built HTML/JS files from the dist folder
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
@@ -93,6 +119,7 @@ async function startServer() {
     });
   }
 
+  // Bind to port 3000 on host 0.0.0.0
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });

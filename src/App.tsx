@@ -1,43 +1,77 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ * 
+ * BioFresh-CV Main Frontend Application
+ * 
+ * In simple words:
+ * This is the interactive React app where users can:
+ * 1. Snap or upload a photo of fresh produce (avocado, mango, banana, tomato, apple, greens, etc.)
+ * 2. Get instant AI freshness scoring & remaining useful life (in hours and days)
+ * 3. Track nutrient retention & get zero-waste recipe suggestions
+ * 4. Save and review previous scans in their history archive
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2 } from 'lucide-react';
+import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2, Upload } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
-import { auth, loginWithGoogle } from './lib/firebase';
+import { auth, loginWithGoogle, loginAnonymously } from './lib/firebase';
 import { savePrediction, getHistory, updatePrediction, PredictionHistoryItem } from './services/history';
 import { predictProduce, fetchWeather, PredictionResult, WeatherData } from './services/api';
 import { calculateDecayRate, calculateRUL, getNutrientRetention, getFreshnessLabel, NutrientDetail } from './lib/science';
 import { getRecommendations, Recipe } from './lib/recipes';
+import { PipelineVisualizer } from './components/PipelineVisualizer';
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, Tooltip, Legend } from 'recharts';
 
+/**
+ * LocationSelectorModal
+ * 
+ * Modal popup that lets the user:
+ * 1. Type their city/address OR auto-detect their GPS location.
+ * 2. Select where the produce is stored:
+ *    - Room Temp (~20°C indoor)
+ *    - Outside (ambient outdoor weather)
+ *    - Refrigerator (custom cold temperature slider, e.g. 4°C)
+ */
 function LocationSelectorModal({ onClose, onSelect }: { 
   onClose: () => void, 
   onSelect: (lat: number, lng: number, name: string, storageEnv: 'room' | 'outside' | 'refrigerator', fridgeTempC?: number) => void 
 }) {
+  // Local state for the typed address or city
   const [address, setAddress] = useState(() => {
     return localStorage.getItem('biofresh_location_name') || '';
   });
+
+  // GPS coordinates (latitude and longitude)
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(() => {
     const lat = localStorage.getItem('biofresh_lat');
     const lon = localStorage.getItem('biofresh_lon');
     return (lat && lon) ? { lat: parseFloat(lat), lng: parseFloat(lon) } : null;
   });
+
+  // Where is the fruit/veggie kept: 'room', 'outside', or 'refrigerator'
   const [storageEnv, setStorageEnv] = useState<'room' | 'outside' | 'refrigerator'>(() => {
     return (localStorage.getItem('biofresh_storage_env') as any) || 'room';
   });
+
+  // If in refrigerator, what temperature is it set to? (Default: 4°C)
   const [fridgeTempC, setFridgeTempC] = useState<number>(() => {
     const saved = localStorage.getItem('biofresh_fridge_temp');
     return saved ? parseFloat(saved) : 4;
   });
 
+  // Status flags for the auto-detect GPS button
   const [detecting, setDetecting] = useState(false);
   const [detectMsg, setDetectMsg] = useState<string | null>(null);
   const [detectError, setDetectError] = useState<string | null>(null);
 
+  /**
+   * handleAutoDetect
+   * 
+   * Reads current GPS coordinates from the browser using navigator.geolocation
+   * and translates coordinates into a readable city name using reverse geocoding.
+   */
   const handleAutoDetect = () => {
     setDetecting(true);
     setDetectError(null);
@@ -58,6 +92,7 @@ function LocationSelectorModal({ onClose, onSelect }: {
         setDetectMsg("✓ Location successfully detected!");
 
         try {
+          // Ask OpenStreetMap Nominatim for the readable city/town name
           const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`, {
             headers: { 'User-Agent': 'BioFresh-CV/1.0' }
           });
@@ -86,11 +121,18 @@ function LocationSelectorModal({ onClose, onSelect }: {
     );
   };
 
+  /**
+   * handleConfirm
+   * 
+   * If the user typed a new city or address, geocode it to coordinates,
+   * then pass the location and storage conditions back to the parent app.
+   */
   const handleConfirm = async () => {
     let finalLat = coords?.lat || 12.97;
     let finalLng = coords?.lng || 77.59;
     const cleanAddress = address.trim();
 
+    // If user typed a custom city name, look up its latitude & longitude
     if (cleanAddress && (!coords || address !== `Lat: ${coords.lat.toFixed(4)}, Lon: ${coords.lng.toFixed(4)}`)) {
       try {
         const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanAddress)}`, {
@@ -301,29 +343,37 @@ function LocationSelectorModal({ onClose, onSelect }: {
   );
 }
 
+/**
+ * App (Main Root Component)
+ * 
+ * Coordinates the entire state, views, camera stream, AI predictions, and history.
+ */
 export default function App() {
+  // Navigation screen view: 'home' | 'scanner' | 'result' | 'history'
   const [view, setView] = useState<'home' | 'scanner' | 'result' | 'history'>('home');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // User Authentication State
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
   
-  // Prediction Data
-  const [currentImage, setCurrentImage] = useState<string | null>(null);
-  const [prediction, setPrediction] = useState<PredictionResult | null>(null);
-  const [weather, setWeather] = useState<WeatherData | null>(null);
-  const [rul, setRul] = useState<number | null>(null);
-  const [nutrients, setNutrients] = useState<{ weightG: number; nutrients: NutrientDetail[] } | null>(null);
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
-  const [lastSavedId, setLastSavedId] = useState<string | null>(null);
+  // Active Produce Prediction Data
+  const [currentImage, setCurrentImage] = useState<string | null>(null); // Base64 picture
+  const [prediction, setPrediction] = useState<PredictionResult | null>(null); // AI output
+  const [weather, setWeather] = useState<WeatherData | null>(null); // Environmental conditions
+  const [rul, setRul] = useState<number | null>(null); // Remaining shelf life in hours
+  const [nutrients, setNutrients] = useState<{ weightG: number; nutrients: NutrientDetail[] } | null>(null); // Estimated vitamins
+  const [recipes, setRecipes] = useState<Recipe[]>([]); // Zero-waste recipes
+  const [lastSavedId, setLastSavedId] = useState<string | null>(null); // Firestore doc ID
   const [feedbackState, setFeedbackState] = useState<'none' | 'correct' | 'incorrect'>('none');
   const [showCorrection, setShowCorrection] = useState(false);
   const [alertEnabled, setAlertEnabled] = useState(false);
-  const [alertThreshold, setAlertThreshold] = useState<number>(12);
+  const [alertThreshold, setAlertThreshold] = useState<number>(12); // Alert when 12h left
   const [showThresholdPicker, setShowThresholdPicker] = useState(false);
   
-  // Environment State
+  // Environment State (Saved location, temperature, and moisture)
   const [homeWeather, setHomeWeather] = useState<WeatherData | null>(() => {
     const saved = localStorage.getItem('biofresh_last_weather');
     try {
@@ -346,18 +396,44 @@ export default function App() {
   const [fetchingHistory, setFetchingHistory] = useState(false);
   const [selectedHistoryItem, setSelectedHistoryItem] = useState<PredictionHistoryItem | null>(null);
   
+  // HTML Refs for Camera feed, Canvas screenshot, and File upload
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
-  // --- Effects ---
+  // --- Lifecycle Effects ---
+
+  /**
+   * Listen for user login state changes.
+   * If not logged in with Google, we sign in anonymously as Guest so the app works seamlessly right away!
+   */
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthReady(true);
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+      if (u) {
+        setUser(u);
+        setAuthReady(true);
+      } else {
+        // Automatically initialize an anonymous guest session so published app works immediately
+        try {
+          const guestUser = await loginAnonymously();
+          setUser(guestUser);
+        } catch (e) {
+          console.warn("Auto guest login failed", e);
+        } finally {
+          setAuthReady(true);
+        }
+      }
     });
     return () => unsubscribe();
   }, []);
 
+  /**
+   * When user is authenticated:
+   * 1. Load their past scan history from Firestore.
+   * 2. Refresh local ambient weather using their saved latitude and longitude.
+   */
   useEffect(() => {
     if (user && authReady) {
       loadHistory();
@@ -393,7 +469,13 @@ export default function App() {
     }
   }, [user, authReady]);
 
-  // --- Actions ---
+  // --- Action Handlers ---
+
+  /**
+   * fetchHomeEnvironment
+   * 
+   * Asks the browser for device GPS location and fetches current weather telemetry.
+   */
   const fetchHomeEnvironment = async () => {
     try {
       const pos: any = await new Promise((res, rej) => 
@@ -416,12 +498,23 @@ export default function App() {
     }
   };
 
+  /**
+   * toggleLocationLock
+   * 
+   * Pin or unpin the current location so it doesn't get overwritten automatically.
+   */
   const toggleLocationLock = () => {
     const newState = !isLocationLocked;
     setIsLocationLocked(newState);
     localStorage.setItem('biofresh_location_locked', newState.toString());
   };
 
+  /**
+   * handleManualLocation
+   * 
+   * Updates coordinates, storage condition ('room', 'outside', or 'refrigerator'),
+   * and calculates the effective temperature in Kelvin for accurate Arrhenius shelf life math.
+   */
   const handleManualLocation = async (
     lat: number, 
     lng: number, 
@@ -468,6 +561,11 @@ export default function App() {
     }
   };
 
+  /**
+   * loadHistory
+   * 
+   * Fetches the user's latest 20 scans from Firestore to display in the History tab.
+   */
   const loadHistory = async () => {
     setFetchingHistory(true);
     try {
@@ -480,6 +578,11 @@ export default function App() {
     }
   };
 
+  /**
+   * handleLogin
+   * 
+   * Triggers Google Sign-In popup with graceful fallback to anonymous guest mode if blocked in iframe.
+   */
   const handleLogin = async () => {
     if (loggingIn) return;
     setLoggingIn(true);
@@ -487,69 +590,171 @@ export default function App() {
     try {
       await loginWithGoogle();
     } catch (err: any) {
+      console.warn("Google login failed, checking fallback:", err);
       if (err.code === 'auth/cancelled-popup-request' || err.code === 'auth/popup-closed-by-user') {
-        // Silent ignore or subtle message
         return;
       }
-      setError("Login failed. Please try again.");
+      
+      // Ensure user has a guest session if Google Auth fails or domain is restricted in published mode
+      try {
+        if (!auth.currentUser) {
+          await loginAnonymously();
+        }
+        if (err.code === 'auth/unauthorized-domain') {
+          setError("Google Login is restricted on this published URL domain. Signed in as Guest — all scanning and history features are active!");
+        } else {
+          setError("Google login unavailable in this browser window. Continuing as Guest user.");
+        }
+      } catch (guestErr) {
+        setError("Login failed. Please refresh and try again.");
+      }
     } finally {
       setLoggingIn(false);
     }
   };
 
+  /**
+   * handleLogout
+   * 
+   * Signs the user out and smoothly starts a clean guest session.
+   */
   const handleLogout = async () => {
     try {
       await signOut(auth);
       reset();
+      // Re-initialize guest session so app remains functional
+      await loginAnonymously();
     } catch (err) {
       console.error("Logout failed", err);
     }
   };
 
-  const startScanner = async () => {
-    if (!user) {
-      setError("Please login to scan produce.");
-      return;
-    }
-    setView('scanner');
-    setError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-    } catch (err: any) {
-      setError("Camera access denied. Please allow camera permissions.");
-      setView('home');
-    }
-  };
-
+  /**
+   * stopScanner
+   * 
+   * Turns off the camera stream to save battery and release device camera hardware.
+   */
   const stopScanner = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
     if (videoRef.current?.srcObject) {
       const stream = videoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
     }
   };
 
-  const captureAndPredict = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
-    
+  /**
+   * startScanner
+   * 
+   * Switches to the scanner screen and prompts for camera access.
+   */
+  const startScanner = async () => {
+    let currentUser = user || auth.currentUser;
+    if (!currentUser) {
+      try {
+        currentUser = await loginAnonymously();
+        setUser(currentUser);
+      } catch (e) {
+        setError("Could not start session. Please try again.");
+        return;
+      }
+    }
+    setError(null);
+    setCameraError(null);
+    setView('scanner');
+  };
+
+  /**
+   * Camera stream lifecycle effect
+   * Turns on the webcam/back-camera when entering 'scanner' view, and turns it off when leaving.
+   */
+  useEffect(() => {
+    let activeTracks: MediaStreamTrack[] = [];
+    let isCancelled = false;
+
+    if (view === 'scanner') {
+      const startCamera = async () => {
+        try {
+          let stream: MediaStream;
+          try {
+            // Prefer back camera on mobile phones ('environment')
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: { ideal: 'environment' } }
+            });
+          } catch {
+            // Fallback to any default camera (like desktop webcam)
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          }
+
+          if (isCancelled) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+          }
+
+          activeTracks = stream.getTracks();
+          setCameraStream(stream);
+
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.muted = true;
+            try {
+              await videoRef.current.play();
+            } catch (playErr) {
+              console.warn("Video play promise error:", playErr);
+            }
+          }
+        } catch (err: any) {
+          console.error("Camera access error:", err);
+          if (!isCancelled) {
+            setCameraError("Camera permission blocked or unavailable in iframe. Use 'Upload Photo' to select an image!");
+          }
+        }
+      };
+
+      startCamera();
+    } else {
+      setCameraStream(null);
+    }
+
+    return () => {
+      isCancelled = true;
+      activeTracks.forEach(track => track.stop());
+    };
+  }, [view]);
+
+  /**
+   * Connect cameraStream to videoRef whenever cameraStream state updates
+   */
+  useEffect(() => {
+    if (view === 'scanner' && videoRef.current && cameraStream) {
+      const v = videoRef.current;
+      v.srcObject = cameraStream;
+      v.muted = true;
+      v.play().catch(e => console.warn("Video play error:", e));
+    }
+  }, [view, cameraStream]);
+
+  /**
+   * processImageAndPredict
+   * 
+   * The core pipeline:
+   * 1. Send picture to Gemini AI Vision Model
+   * 2. Fetch local temperature and humidity
+   * 3. Run Arrhenius Equation (calculate decay rate k, shelf life RUL in hours, vitamins)
+   * 4. Look up zero-waste recipes if near expiry
+   * 5. Save the scan result to Firestore database
+   */
+  const processImageAndPredict = async (imageData: string) => {
     setLoading(true);
     setError(null);
-    
-    try {
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      ctx?.drawImage(video, 0, 0);
-      
-      const imageData = canvas.toDataURL('image/jpeg');
-      setCurrentImage(imageData);
-      stopScanner();
+    setCurrentImage(imageData);
+    stopScanner();
 
-      // 1. Get Lat/Lon for weather
+    try {
+      // 1. Get Lat/Lon coordinates for ambient weather
       let lat = 0, lon = 0;
       const savedLat = localStorage.getItem('biofresh_lat');
       const savedLon = localStorage.getItem('biofresh_lon');
@@ -569,7 +774,7 @@ export default function App() {
         }
       }
 
-      // 2. Parallel API calls (Predict + Weather)
+      // 2. Parallel API calls (Predict produce with Gemini + Fetch Weather with Open-Meteo)
       const [predResult, weatherResult] = await Promise.all([
         predictProduce(imageData),
         fetchWeather(lat, lon)
@@ -594,6 +799,7 @@ export default function App() {
       setPrediction(predResult);
       setWeather(effectiveWeather);
 
+      // Run Arrhenius kinetics equation: k = A * exp(-Ea / RT)
       const k = calculateDecayRate(predResult.produce_type, effectiveTempK);
       const calculatedRul = calculateRUL(predResult.quality_score, k);
       
@@ -609,20 +815,78 @@ export default function App() {
         rulHours: calculatedRul,
         temperatureK: effectiveTempK,
         humidity: weatherResult.humidity_percent,
-        imageUrl: imageData // Re-enabled snapshot storage
+        imageUrl: imageData
       });
 
       if (savedId) setLastSavedId(savedId);
 
       setView('result');
     } catch (err: any) {
-      setError(err.message || "Failed to analyze produce");
+      setError(err.message || "Failed to analyze produce image");
       setView('home');
     } finally {
       setLoading(false);
     }
   };
 
+  /**
+   * captureAndPredict
+   * 
+   * Takes a snapshot from the live camera canvas and sends it to the prediction pipeline.
+   */
+  const captureAndPredict = async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    const w = video.videoWidth || 640;
+    const h = video.videoHeight || 480;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, w, h);
+      const imageData = canvas.toDataURL('image/jpeg', 0.85);
+      await processImageAndPredict(imageData);
+    }
+  };
+
+  /**
+   * handleFileUpload
+   * 
+   * Reads an uploaded image file (JPEG/PNG) from disk and sends it to the prediction pipeline.
+   */
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const dataUrl = event.target?.result as string;
+      if (dataUrl) {
+        await processImageAndPredict(dataUrl);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  /**
+   * triggerFileUpload
+   * 
+   * Opens the file picker dialog.
+   */
+  const triggerFileUpload = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
+  /**
+   * reset
+   * 
+   * Clears current scan and navigates back to the Home dashboard.
+   */
   const reset = () => {
     stopScanner();
     setView('home');
@@ -640,40 +904,85 @@ export default function App() {
     setShowCorrection(false);
   };
 
+  /**
+   * handleFeedback
+   * 
+   * When user clicks "Looks Correct" or "Wrong Produce", this verifies or opens alternative suggestions.
+   */
   const handleFeedback = async (correct: boolean) => {
     setFeedbackState(correct ? 'correct' : 'incorrect');
     if (!correct) {
       setShowCorrection(true);
-    } else if (lastSavedId) {
-      await updatePrediction(lastSavedId, { isCorrect: true });
+    } else {
+      setShowCorrection(false);
+      if (lastSavedId) {
+        await updatePrediction(lastSavedId, { isCorrect: true }).catch(err => console.warn("Update prediction failed:", err));
+      }
     }
   };
 
+  /**
+   * handleCorrection
+   * 
+   * If the AI confused lookalike items (e.g. Avocado vs Mango), the user selects the right one here.
+   * We instantly re-run the Arrhenius math, update vitamins & recipes, and update Firestore!
+   */
   const handleCorrection = async (newType: string) => {
-    if (!prediction || !weather || !lastSavedId) return;
+    if (!prediction || !weather) return;
 
-    // Recalculate based on new type
+    // Recalculate Arrhenius decay and RUL based on newly verified produce type
     const k = calculateDecayRate(newType, weather.temperature_kelvin);
     const calculatedRul = calculateRUL(prediction.quality_score, k);
     const calculatedNutrients = getNutrientRetention(newType, prediction.quality_score);
 
-    // Update local state
-    setPrediction({ ...prediction, produce_type: newType });
+    // Update local state immediately
+    setPrediction({ 
+      ...prediction, 
+      produce_type: newType,
+      confidence_score: 1.0 
+    });
     setRul(calculatedRul);
     setNutrients(calculatedNutrients);
     setRecipes(getRecommendations(newType, calculatedRul));
     setShowCorrection(false);
     setFeedbackState('correct');
 
-    // Update Firestore
-    await updatePrediction(lastSavedId, { 
-      produceType: newType,
-      isCorrect: false,
-      correctedType: newType,
-      rulHours: calculatedRul
-    });
+    // Sync correction with Firestore
+    if (lastSavedId) {
+      try {
+        await updatePrediction(lastSavedId, { 
+          produceType: newType,
+          isCorrect: false,
+          correctedType: newType,
+          rulHours: calculatedRul
+        });
+      } catch (e) {
+        console.warn("Firestore update error:", e);
+      }
+    } else {
+      try {
+        const savedId = await savePrediction({
+          produceType: newType,
+          qualityScore: prediction.quality_score,
+          rulHours: calculatedRul,
+          temperatureK: weather.temperature_kelvin,
+          humidity: weather.humidity_percent,
+          imageUrl: currentImage || undefined,
+          isCorrect: false,
+          correctedType: newType
+        });
+        if (savedId) setLastSavedId(savedId);
+      } catch (e) {
+        console.warn("Firestore save error:", e);
+      }
+    }
   };
 
+  /**
+   * toggleAlert
+   * 
+   * Turns expiration reminder notifications on or off for the current scan.
+   */
   const toggleAlert = async () => {
     const newState = !alertEnabled;
     setAlertEnabled(newState);
@@ -685,6 +994,11 @@ export default function App() {
     }
   };
 
+  /**
+   * updateAlertThreshold
+   * 
+   * Changes how many hours before expiration the alert should fire (e.g., 6h, 12h, 24h).
+   */
   const updateAlertThreshold = async (val: number) => {
     setAlertThreshold(val);
     if (lastSavedId && alertEnabled) {
@@ -692,10 +1006,20 @@ export default function App() {
     }
   };
 
+  /**
+   * openHistoryItem
+   * 
+   * Opens the full details modal for a past scan clicked in the history list.
+   */
   const openHistoryItem = (item: PredictionHistoryItem) => {
     setSelectedHistoryItem(item);
   };
 
+  /**
+   * toggleHistoryAlert
+   * 
+   * Toggles alert setting on a saved past scan inside the History modal.
+   */
   const toggleHistoryAlert = async (item: PredictionHistoryItem) => {
     if (!item.id) return;
     const newState = !item.alertEnabled;
@@ -715,6 +1039,11 @@ export default function App() {
     });
   };
 
+  /**
+   * updateHistoryAlertThreshold
+   * 
+   * Updates alert threshold on a saved past scan inside the History modal.
+   */
   const updateHistoryAlertThreshold = async (item: PredictionHistoryItem, val: number) => {
     if (!item.id) return;
     const updated = { ...item, alertThreshold: val };
@@ -739,30 +1068,48 @@ export default function App() {
             </div>
             
             <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setView('history')}
+                className={`p-2 rounded-full transition-colors ${view === 'history' ? 'bg-teal-50 text-[#0097B2]' : 'hover:bg-slate-100 text-slate-600'}`}
+                title="View History"
+              >
+                <HistoryIcon size={20} />
+              </button>
+
               {user ? (
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => setView('history')}
-                    className={`p-2 rounded-full transition-colors ${view === 'history' ? 'bg-teal-50 text-[#0097B2]' : 'hover:bg-slate-100 text-slate-600'}`}
-                  >
-                    <HistoryIcon size={20} />
-                  </button>
-                  <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 overflow-hidden group relative">
-                    <img src={user.photoURL || ''} alt="User" className="w-full h-full object-cover" />
-                    <button 
-                      onClick={handleLogout}
-                      className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity"
-                    >
-                      <LogOut size={14} />
-                    </button>
-                  </div>
+                <div className="flex items-center gap-1.5">
+                  {user.photoURL ? (
+                    <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 overflow-hidden group relative flex-shrink-0 cursor-pointer" title={`Signed in as ${user.displayName || user.email}`}>
+                      <img src={user.photoURL} alt="User" className="w-full h-full object-cover" />
+                      <button 
+                        onClick={handleLogout}
+                        className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity"
+                        title="Logout"
+                      >
+                        <LogOut size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={handleLogin}
+                        disabled={loggingIn}
+                        className="flex items-center gap-1 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-full transition-colors"
+                        title="Sign in with Google"
+                      >
+                        <UserIcon size={14} className="text-[#0097B2]" />
+                        <span>{loggingIn ? 'Connecting...' : 'Google Login'}</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <button 
                   onClick={handleLogin}
-                  className="flex items-center gap-1 text-sm font-bold text-slate-600 hover:text-slate-900 bg-slate-100 px-3 py-1.5 rounded-full"
+                  disabled={loggingIn}
+                  className="flex items-center gap-1 text-xs font-bold text-slate-700 hover:text-slate-900 bg-slate-100 px-3 py-1.5 rounded-full transition-colors"
                 >
-                  <LogIn size={16} /> Login
+                  <LogIn size={14} /> {loggingIn ? 'Logging in...' : 'Login'}
                 </button>
               )}
             </div>
@@ -844,15 +1191,33 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Hidden file input for photo upload fallback */}
+              <input 
+                type="file" 
+                ref={fileInputRef} 
+                accept="image/*" 
+                onChange={handleFileUpload} 
+                className="hidden" 
+              />
+
               {user ? (
                 <>
-                  <button 
-                    onClick={startScanner}
-                    className="w-full bg-[#1AAB5F] hover:bg-[#158a4d] text-white py-6 rounded-full flex items-center justify-center gap-3 font-bold text-lg shadow-xl shadow-green-100 transition-all hover:scale-[1.02] active:scale-95"
-                  >
-                    <Camera size={24} />
-                    New Prediction
-                  </button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={startScanner}
+                      className="bg-[#1AAB5F] hover:bg-[#158a4d] text-white py-5 px-4 rounded-3xl flex items-center justify-center gap-2 font-bold text-base shadow-lg shadow-green-100 transition-all hover:scale-[1.02] active:scale-95"
+                    >
+                      <Camera size={22} />
+                      Scan Camera
+                    </button>
+                    <button 
+                      onClick={triggerFileUpload}
+                      className="bg-slate-800 hover:bg-slate-900 text-white py-5 px-4 rounded-3xl flex items-center justify-center gap-2 font-bold text-base shadow-lg shadow-slate-200 transition-all hover:scale-[1.02] active:scale-95"
+                    >
+                      <Upload size={22} />
+                      Upload Photo
+                    </button>
+                  </div>
 
                   {/* Active Reminders Section */}
                   {history.some(item => item.alertEnabled) && (
@@ -933,28 +1298,78 @@ export default function App() {
                 <div className="px-4 py-2 bg-white/10 backdrop-blur rounded-full text-white text-sm font-medium">
                   Center Produce in Frame
                 </div>
-                <div className="w-10" />
+                <button onClick={triggerFileUpload} className="p-2 bg-white/10 backdrop-blur rounded-full text-white flex items-center justify-center" title="Upload Photo">
+                  <Upload size={20} />
+                </button>
               </div>
 
-              <video 
-                ref={videoRef} 
-                autoPlay 
-                playsInline 
-                 className="flex-1 object-cover"
-              />
+              <div className="flex-1 relative overflow-hidden bg-slate-950 flex items-center justify-center">
+                <video 
+                  ref={(el) => {
+                    // @ts-ignore
+                    videoRef.current = el;
+                    if (el && cameraStream) {
+                      if (el.srcObject !== cameraStream) {
+                        el.srcObject = cameraStream;
+                      }
+                      el.muted = true;
+                      el.play().catch(e => console.warn("Video play error:", e));
+                    }
+                  }}
+                  autoPlay 
+                  playsInline 
+                  muted
+                  onLoadedMetadata={(e) => {
+                    e.currentTarget.muted = true;
+                    e.currentTarget.play().catch(console.warn);
+                  }}
+                  onCanPlay={(e) => {
+                    e.currentTarget.muted = true;
+                    e.currentTarget.play().catch(console.warn);
+                  }}
+                  className="w-full h-full object-cover min-h-[300px]"
+                />
+                
+                {cameraError && (
+                  <div className="absolute inset-x-6 top-24 bg-slate-900/90 backdrop-blur border border-slate-800 p-4 rounded-2xl text-center space-y-3 z-20">
+                    <p className="text-amber-400 text-xs font-semibold">{cameraError}</p>
+                    <button 
+                      onClick={triggerFileUpload}
+                      className="px-4 py-2 bg-[#1AAB5F] hover:bg-[#158a4d] text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 mx-auto"
+                    >
+                      <Upload size={14} /> Choose Image File
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <canvas ref={canvasRef} className="hidden" />
 
-              <div className="absolute bottom-12 left-0 right-0 flex flex-col items-center gap-6">
+              <div className="absolute bottom-12 left-0 right-0 flex flex-col items-center gap-6 z-10">
                 <p className="text-white/60 text-sm font-medium">Auto-calibrating vision filters...</p>
-                <button 
-                  onClick={captureAndPredict}
-                  disabled={loading}
-                  className="w-20 h-20 bg-white rounded-full flex items-center justify-center border-4 border-white/30 group active:scale-90 transition-transform"
-                >
-                  <div className="w-16 h-16 bg-[#1AAB5F] rounded-full flex items-center justify-center text-white">
-                    {loading ? <Loader2 size={32} className="animate-spin" /> : <Camera size={32} />}
-                  </div>
-                </button>
+                
+                <div className="flex items-center gap-6">
+                  <button 
+                    onClick={triggerFileUpload}
+                    className="w-12 h-12 bg-white/10 backdrop-blur hover:bg-white/20 text-white rounded-full flex items-center justify-center transition-colors"
+                    title="Upload image file"
+                  >
+                    <Upload size={20} />
+                  </button>
+
+                  <button 
+                    onClick={captureAndPredict}
+                    disabled={loading}
+                    className="w-20 h-20 bg-white rounded-full flex items-center justify-center border-4 border-white/30 group active:scale-90 transition-transform"
+                    title="Capture image"
+                  >
+                    <div className="w-16 h-16 bg-[#1AAB5F] rounded-full flex items-center justify-center text-white">
+                      {loading ? <Loader2 size={32} className="animate-spin" /> : <Camera size={32} />}
+                    </div>
+                  </button>
+
+                  <div className="w-12 h-12" />
+                </div>
               </div>
             </motion.div>
           )}
@@ -977,9 +1392,16 @@ export default function App() {
                   }`}>
                     {getFreshnessLabel(rul).label}
                   </span>
-                  <h2 className="text-2xl font-black text-slate-800 tracking-tight capitalize mt-2">
-                    {prediction.produce_type.replace('_', ' ')}
-                  </h2>
+                  <div className="flex items-center gap-2 mt-2">
+                    <h2 className="text-2xl font-black text-slate-800 tracking-tight capitalize">
+                      {prediction.produce_type.replace('_', ' ')}
+                    </h2>
+                    {feedbackState === 'correct' && (
+                      <span className="text-xs bg-[#1AAB5F]/10 text-[#1AAB5F] border border-[#1AAB5F]/20 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+                        ✓ Verified
+                      </span>
+                    )}
+                  </div>
                   {nutrients && (
                     <span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-2 py-0.5 rounded border border-slate-100 mt-1">
                       EST. WEIGHT: {nutrients.weightG}g
@@ -998,6 +1420,72 @@ export default function App() {
                   </div>
                 </div>
                 <p className="text-slate-400 text-xs font-bold uppercase tracking-widest pt-6">Remaining Useful Life</p>
+
+                {/* Produce Verification & Lookalike Suggestions Bar */}
+                <div className="w-full bg-slate-50/80 border border-slate-100 p-4 rounded-3xl space-y-3 text-left my-2">
+                  <div className="flex justify-between items-center text-xs font-bold uppercase tracking-wider text-slate-700">
+                    <span className="flex items-center gap-1.5">
+                      <AlertTriangle size={14} className="text-amber-500" />
+                      Verify Item / Lookalikes
+                    </span>
+                    <span className="text-[10px] text-slate-400 normal-case font-medium">
+                      {feedbackState === 'correct' ? 'Verified item' : 'Tap to switch item'}
+                    </span>
+                  </div>
+
+                  {prediction.alternative_candidates && prediction.alternative_candidates.length > 0 && (
+                    <div className="p-3 bg-amber-50/90 border border-amber-200/60 rounded-2xl text-xs space-y-1.5">
+                      <p className="font-bold text-amber-900 flex items-center gap-1">
+                        <span>🔍 Similar produce candidates detected:</span>
+                      </p>
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {prediction.alternative_candidates.map(cand => (
+                          <button
+                            key={cand.type}
+                            onClick={() => handleCorrection(cand.type)}
+                            className="px-3 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-xl text-xs font-bold transition-all flex items-center gap-1 border border-amber-300/60 active:scale-95"
+                            title={cand.reason}
+                          >
+                            <span>{cand.label}</span>
+                            {cand.reason && <span className="text-[10px] text-amber-700/80">({cand.reason})</span>}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { type: 'avocado', label: '🥑 Avocado' },
+                      { type: 'mango', label: '🥭 Mango' },
+                      { type: 'banana', label: '🍌 Banana' },
+                      { type: 'apple', label: '🍎 Apple' },
+                      { type: 'tomato', label: '🍅 Tomato' },
+                      { type: 'orange', label: '🍊 Orange' },
+                      { type: 'lemon', label: '🍋 Lemon' },
+                      { type: 'leafy_greens', label: '🥬 Leafy Greens' },
+                      { type: 'papaya', label: '🍈 Papaya' },
+                      { type: 'lime', label: '🟢 Lime' },
+                      { type: 'cucumber', label: '🥒 Cucumber' }
+                    ].map(item => {
+                      const isSelected = prediction.produce_type === item.type;
+                      return (
+                        <button
+                          key={item.type}
+                          onClick={() => handleCorrection(item.type)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1 ${
+                            isSelected
+                              ? 'bg-[#1AAB5F] text-white shadow-md shadow-green-100 ring-2 ring-[#1AAB5F]/20'
+                              : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:bg-slate-100 active:scale-95'
+                          }`}
+                        >
+                          <span>{item.label}</span>
+                          {isSelected && <span>✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
                 
                 {/* Alert & Feedback Actions */}
                 <div className="w-full space-y-3 pt-6">
@@ -1093,6 +1581,17 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Visual Step-by-Step AI & Science Pipeline Breakdown */}
+              <PipelineVisualizer 
+                imageUrl={currentImage}
+                produceType={prediction.produce_type}
+                qualityScore={prediction.quality_score}
+                temperatureK={weather?.temperature_kelvin || 293.15}
+                humidity={weather?.humidity_percent || 60}
+                rulHours={rul}
+                confidence={prediction.confidence_score || 0.94}
+              />
 
               <div className="bg-white rounded-4xl p-8 shadow-sm border border-slate-100 space-y-6">
                 <div className="flex justify-between items-end">
@@ -1342,6 +1841,17 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Historical Step-by-Step AI & Science Pipeline Breakdown */}
+              <PipelineVisualizer 
+                imageUrl={selectedHistoryItem.imageUrl}
+                produceType={selectedHistoryItem.produceType}
+                qualityScore={selectedHistoryItem.qualityScore}
+                temperatureK={selectedHistoryItem.temperatureK}
+                humidity={selectedHistoryItem.humidity}
+                rulHours={selectedHistoryItem.rulHours}
+                confidence={0.95}
+              />
 
               <div className="bg-white rounded-4xl p-8 shadow-sm border border-slate-100 space-y-6">
                 <div className="flex justify-between items-end">

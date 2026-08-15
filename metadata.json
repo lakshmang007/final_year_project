@@ -2,6 +2,6 @@
   "name": "BioFresh-CV",
   "description": "AI-powered produce freshness prediction with Remaining Useful Life (RUL) tracking and zero-waste recipe recommendations.",
   "requestFramePermissions": ["camera", "geolocation"],
-  "majorCapabilities": ["image_processing", "environmental_tracking"]
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
 
