@@ -13,7 +13,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2, Upload } from 'lucide-react';
+import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2, Upload, FileSpreadsheet, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { auth, loginWithGoogle, checkRedirectLogin, loginAnonymously } from './lib/firebase';
@@ -1748,6 +1748,15 @@ export default function App() {
                  </div>
                  
                  <div className="flex items-center gap-2">
+                   <a
+                     href="/BioFresh_CV_Research_Dataset.xlsx"
+                     download="BioFresh_CV_Research_Dataset.xlsx"
+                     className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-full text-xs font-bold transition-all active:scale-95 shadow-xs flex items-center gap-1.5"
+                     title="Download Research Dataset (.xlsx)"
+                   >
+                     <FileSpreadsheet size={15} className="text-emerald-600" />
+                     <span>Dataset (.xlsx)</span>
+                   </a>
                    <button 
                      onClick={() => loadHistory()} 
                      disabled={fetchingHistory}

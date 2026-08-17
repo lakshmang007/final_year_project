@@ -134,6 +134,21 @@ app.post("/api/ml/benchmark", (req, res) => {
 });
 
 /**
+ * GET /api/download-dataset
+ * 
+ * Generates and streams the multi-sheet BioFresh-CV benchmark Excel spreadsheet.
+ */
+app.get("/api/download-dataset", (req, res) => {
+  try {
+    const filePath = path.join(process.cwd(), 'public', 'BioFresh_CV_Research_Dataset.xlsx');
+    res.download(filePath, 'BioFresh_CV_Research_Dataset.xlsx');
+  } catch (error: any) {
+    console.error("Dataset download error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * startServer
  * 
  * Boots up the Express web server and attaches Vite development middleware.
