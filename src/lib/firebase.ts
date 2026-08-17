@@ -7,7 +7,14 @@
  * 2. Firestore database (saving and retrieving past scans)
  */
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously } from 'firebase/auth';
+import { 
+  getAuth, 
+  GoogleAuthProvider, 
+  signInWithPopup, 
+  signInWithRedirect, 
+  getRedirectResult,
+  signInAnonymously 
+} from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -22,35 +29,65 @@ export const auth = getAuth(app);
 
 // Google Sign-In Provider setup
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({
+  prompt: 'select_account'
+});
 
 /**
  * loginWithGoogle
  * 
- * Opens the Google Sign-in popup so the user can log in with their Google account.
+ * Attempts popup login first, and falls back to redirect for mobile browsers if popup fails or is blocked.
  */
 export const loginWithGoogle = async () => {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error: any) {
+    // If on mobile or popup blocked, try redirect flow
+    if (
+      error?.code === 'auth/popup-blocked' || 
+      error?.code === 'auth/popup-closed-by-user' ||
+      /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent)
+    ) {
+      if (error?.code !== 'auth/popup-closed-by-user') {
+        console.log("Switching to signInWithRedirect for mobile/popup restriction...");
+        await signInWithRedirect(auth, googleProvider);
+        return null;
+      }
+    }
     console.error("Google Login failed:", error);
     throw error;
   }
 };
 
 /**
+ * checkRedirectLogin
+ * 
+ * Checks if user just completed a mobile redirect login.
+ */
+export const checkRedirectLogin = async () => {
+  try {
+    const result = await getRedirectResult(auth);
+    return result ? result.user : null;
+  } catch (error) {
+    console.warn("Redirect result check:", error);
+    return null;
+  }
+};
+
+/**
  * loginAnonymously
  * 
- * Creates a frictionless guest session instantly without requiring a password or Google account.
- * This makes sure the app works smoothly immediately on first load.
+ * Creates a frictionless guest session if Anonymous Sign-in is enabled in Firebase.
+ * If disabled in Firebase Console, returns null gracefully without throwing an uncaught error.
  */
 export const loginAnonymously = async () => {
   try {
     const result = await signInAnonymously(auth);
     return result.user;
   } catch (error: any) {
-    console.error("Anonymous Login failed:", error);
-    throw error;
+    console.warn("Anonymous auth disabled or restricted in Firebase console:", error?.code || error?.message);
+    return null;
   }
 };
 

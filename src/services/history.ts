@@ -150,26 +150,68 @@ function parseTimestampSafe(rawTimestamp: any): Date {
   return new Date();
 }
 
+const GUEST_HISTORY_KEY = 'biofresh_guest_history';
+
+function getLocalGuestHistory(): PredictionHistoryItem[] {
+  try {
+    const raw = localStorage.getItem(GUEST_HISTORY_KEY);
+    if (!raw) return [];
+    const items: any[] = JSON.parse(raw);
+    return items.map(item => ({
+      ...item,
+      timestamp: parseTimestampSafe(item.timestamp)
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalGuestHistory(items: PredictionHistoryItem[]) {
+  try {
+    localStorage.setItem(GUEST_HISTORY_KEY, JSON.stringify(items.slice(0, 30)));
+  } catch (e) {
+    console.warn("Could not save to localStorage", e);
+  }
+}
+
 /**
  * savePrediction
  * 
- * Saves a new produce scan to the 'predictions' database collection.
- * Attaches the current user's ID, compressed thumbnail, and current timestamp.
+ * Saves a new produce scan to the 'predictions' database collection if signed in,
+ * or saves locally to device storage for guest users.
  */
 export async function savePrediction(data: Omit<PredictionHistoryItem, 'id' | 'timestamp' | 'userId'>): Promise<string | null> {
-  // Only save if someone is logged in (either via Google or auto-guest)
+  let safeImageUrl = data.imageUrl;
+  if (safeImageUrl && safeImageUrl.length > 40000) {
+    safeImageUrl = await compressImageThumbnail(safeImageUrl);
+  }
+
+  // If user is not authenticated with Firebase, save locally
   if (!auth.currentUser) {
-    console.warn("Cannot save prediction: auth.currentUser is not ready");
-    return null;
+    const localId = `local_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const localItem: PredictionHistoryItem = {
+      id: localId,
+      userId: 'guest',
+      produceType: data.produceType,
+      qualityScore: Number(data.qualityScore),
+      rulHours: Number(data.rulHours),
+      temperatureK: Number(data.temperatureK || 293.15),
+      humidity: Number(data.humidity || 60),
+      timestamp: new Date(),
+      imageUrl: safeImageUrl,
+      isCorrect: data.isCorrect,
+      correctedType: data.correctedType,
+      alertEnabled: data.alertEnabled,
+      alertThreshold: data.alertThreshold,
+    };
+    const currentList = getLocalGuestHistory();
+    saveLocalGuestHistory([localItem, ...currentList]);
+    console.log("Prediction saved to local guest history:", localId);
+    return localId;
   }
   
   const path = 'predictions';
   try {
-    let safeImageUrl = data.imageUrl;
-    if (safeImageUrl && safeImageUrl.length > 40000) {
-      safeImageUrl = await compressImageThumbnail(safeImageUrl);
-    }
-
     const payload = {
       userId: auth.currentUser.uid,
       produceType: data.produceType,
@@ -206,7 +248,14 @@ export async function savePrediction(data: Omit<PredictionHistoryItem, 'id' | 't
  * the fruit type, toggles alerts, or verifies correctness).
  */
 export async function updatePrediction(id: string, data: Partial<Omit<PredictionHistoryItem, 'id' | 'timestamp' | 'userId'>>) {
-  if (!auth.currentUser || !id) return;
+  if (!id) return;
+  
+  if (id.startsWith('local_') || !auth.currentUser) {
+    const list = getLocalGuestHistory();
+    const updated = list.map(item => item.id === id ? { ...item, ...data } : item);
+    saveLocalGuestHistory(updated);
+    return;
+  }
   
   const path = `predictions/${id}`;
   try {
@@ -226,12 +275,12 @@ export async function updatePrediction(id: string, data: Partial<Omit<Prediction
 /**
  * getHistory
  * 
- * Fetches the user's past scans from Firestore, sorted by most recent first.
+ * Fetches the user's past scans from Firestore (if signed in) or from local device storage.
  */
 export async function getHistory(limitCount: number = 20): Promise<PredictionHistoryItem[]> {
   if (!auth.currentUser) {
-    console.log("getHistory skipped: auth.currentUser is not yet authenticated");
-    return [];
+    const local = getLocalGuestHistory();
+    return local.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()).slice(0, limitCount);
   }
   
   const path = 'predictions';
@@ -273,17 +322,24 @@ export async function getHistory(limitCount: number = 20): Promise<PredictionHis
     } catch {
       // Ignored for graceful degradation
     }
-    return [];
+    return getLocalGuestHistory().slice(0, limitCount);
   }
 }
 
 /**
  * deletePrediction
  * 
- * Deletes a scan record from Firestore by ID.
+ * Deletes a scan record from Firestore or local storage.
  */
 export async function deletePrediction(id: string): Promise<boolean> {
-  if (!auth.currentUser || !id) return false;
+  if (!id) return false;
+  
+  if (id.startsWith('local_') || !auth.currentUser) {
+    const list = getLocalGuestHistory();
+    saveLocalGuestHistory(list.filter(item => item.id !== id));
+    return true;
+  }
+
   const path = `predictions/${id}`;
   try {
     const docRef = doc(db, 'predictions', id);
