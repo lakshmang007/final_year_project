@@ -13,7 +13,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2, Upload, FileSpreadsheet, Download, SwitchCamera, Zap, ZapOff, Image as ImageIcon } from 'lucide-react';
+import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2, Upload, FileSpreadsheet, Download, SwitchCamera, Zap, ZapOff, Image as ImageIcon, UserX } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { auth, loginWithGoogle, checkRedirectLogin, loginAnonymously } from './lib/firebase';
@@ -398,6 +398,14 @@ export default function App() {
   const [history, setHistory] = useState<PredictionHistoryItem[]>([]);
   const [fetchingHistory, setFetchingHistory] = useState(false);
   const [selectedHistoryItem, setSelectedHistoryItem] = useState<PredictionHistoryItem | null>(null);
+  
+  // Produce Validation Alert State (Supports both Face / Human and General Non-Produce)
+  const [invalidProduceAlert, setInvalidProduceAlert] = useState<{
+    isHuman: boolean;
+    title: string;
+    message: string;
+    tip?: string;
+  } | null>(null);
   
   // HTML Refs for Camera feed, Canvas screenshot, and File upload
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -827,6 +835,50 @@ export default function App() {
   }, [view, cameraStream]);
 
   /**
+   * compressImageBase64
+   * 
+   * Downscales raw high-resolution photos (e.g., from 48MP phone cameras) to a maximum dimension of 1280px.
+   */
+  const compressImageBase64 = (dataUrl: string, maxDimension = 1280, quality = 0.85): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width <= maxDimension && height <= maxDimension) {
+          resolve(dataUrl);
+          return;
+        }
+
+        if (width > height) {
+          if (width > maxDimension) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          }
+        } else {
+          if (height > maxDimension) {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  };
+
+  /**
    * processImageAndPredict
    * 
    * The core pipeline:
@@ -836,13 +888,16 @@ export default function App() {
    * 4. Look up zero-waste recipes if near expiry
    * 5. Save the scan result to Firestore database
    */
-  const processImageAndPredict = async (imageData: string) => {
+  const processImageAndPredict = async (rawImageData: string) => {
     setLoading(true);
     setError(null);
-    setCurrentImage(imageData);
     stopScanner();
 
     try {
+      // 0. Ensure image is optimized for network transport
+      const imageData = await compressImageBase64(rawImageData);
+      setCurrentImage(imageData);
+
       // 1. Get Lat/Lon coordinates for ambient weather
       let lat = 0, lon = 0;
       const savedLat = localStorage.getItem('biofresh_lat');
@@ -868,6 +923,35 @@ export default function App() {
         predictProduce(imageData),
         fetchWeather(lat, lon)
       ]);
+
+      // Strict validation check: If Gemini or vision detector determines this is a human/face or invalid non-produce
+      if (predResult.isInvalid === true || predResult.is_produce === false || predResult.produce_type === 'unknown' || predResult.is_human === true) {
+        const isHuman = predResult.is_human === true || 
+                        /human|face|person|selfie|portrait|hands/i.test(predResult.message || "") || 
+                        /human|face|person|selfie|portrait|hands/i.test(predResult.details || "");
+
+        if (isHuman) {
+          setInvalidProduceAlert({
+            isHuman: true,
+            title: "Human / Face Detected",
+            message: "You clicked or scanned a person. BioFresh-CV requires a photo of fresh produce (e.g. apple, banana, avocado, tomato, leafy greens) to calculate freshness and shelf life.",
+            tip: "Tip: Please point your camera directly at fresh fruit or vegetables instead."
+          });
+          setError("Human / face detected. Please take a photo of fresh produce.");
+        } else {
+          setInvalidProduceAlert({
+            isHuman: false,
+            title: "Unrecognized Produce",
+            message: predResult.message || "We couldn't identify produce in this image. Please take a clear picture of a single fruit or vegetable.",
+            tip: "Tip: Ensure good lighting and place the produce item in the center of the frame."
+          });
+          setError(predResult.message || "Unrecognized produce. Please try again.");
+        }
+
+        setView('home');
+        setLoading(false);
+        return; // Do NOT proceed with Arrhenius prediction or saving to database
+      }
 
       // 3. Arrhenius Engine Logic with Storage Environment adjustment
       const storageEnv = localStorage.getItem('biofresh_storage_env') || 'room';
@@ -1378,37 +1462,32 @@ export default function App() {
 
               {user ? (
                 <>
-                  <div className="space-y-2">
-                    <button 
-                      onClick={startScanner}
-                      className="w-full bg-[#1AAB5F] hover:bg-[#158a4d] text-white py-4.5 px-6 rounded-3xl flex items-center justify-between font-bold text-base shadow-lg shadow-emerald-900/10 transition-all hover:scale-[1.01] active:scale-95"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center">
-                          <Camera size={22} />
-                        </div>
-                        <div className="text-left">
-                          <div className="font-extrabold text-sm sm:text-base">Live AI Scanner</div>
-                          <div className="text-[11px] font-medium text-emerald-100">Real-time viewfinder & vision analysis</div>
-                        </div>
-                      </div>
-                      <ChevronRight size={20} className="text-emerald-200" />
-                    </button>
-
-                    <div className="grid grid-cols-2 gap-2.5">
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
                       <button 
                         onClick={triggerNativeCamera}
-                        className="bg-emerald-950 hover:bg-slate-900 text-white py-3.5 px-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-xs sm:text-sm border border-emerald-900/40 shadow-xs transition-all active:scale-95"
+                        className="bg-[#1AAB5F] hover:bg-[#158a4d] text-white py-4.5 px-4 rounded-3xl flex flex-col items-center justify-center gap-2 font-bold text-sm shadow-lg shadow-emerald-900/10 transition-all hover:scale-[1.01] active:scale-95 border border-emerald-600/30"
                       >
-                        <Camera size={18} className="text-emerald-400" />
-                        <span>Snap Photo</span>
+                        <div className="w-12 h-12 rounded-2xl bg-white/20 flex items-center justify-center">
+                          <Camera size={24} className="text-white" />
+                        </div>
+                        <div className="text-center">
+                          <div className="font-extrabold text-sm sm:text-base">Snap Photo</div>
+                          <div className="text-[10px] font-medium text-emerald-100">Take a photo of produce</div>
+                        </div>
                       </button>
+
                       <button 
                         onClick={triggerGalleryUpload}
-                        className="bg-white hover:bg-slate-50 text-slate-700 py-3.5 px-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-xs sm:text-sm border border-slate-200 shadow-xs transition-all active:scale-95"
+                        className="bg-white hover:bg-slate-50 text-slate-700 py-4.5 px-4 rounded-3xl flex flex-col items-center justify-center gap-2 font-bold text-sm border border-slate-200 shadow-sm transition-all hover:scale-[1.01] active:scale-95"
                       >
-                        <Upload size={18} className="text-slate-500" />
-                        <span>Upload File</span>
+                        <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-600">
+                          <Upload size={24} />
+                        </div>
+                        <div className="text-center">
+                          <div className="font-extrabold text-sm sm:text-base text-slate-800">Upload Photo</div>
+                          <div className="text-[10px] font-medium text-slate-400">Choose from gallery or files</div>
+                        </div>
                       </button>
                     </div>
                   </div>
@@ -1469,9 +1548,14 @@ export default function App() {
               )}
 
               {error && (
-                <div className="p-4 bg-red-50 text-red-600 rounded-2xl border border-red-100 text-sm font-medium flex items-center gap-2">
-                  <Info size={16} />
-                  {error}
+                <div className="p-4.5 bg-amber-50 text-amber-900 rounded-3xl border border-amber-200/70 text-xs sm:text-sm font-medium flex items-start gap-3 shadow-xs">
+                  <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5 font-bold">
+                    <AlertTriangle size={18} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="font-bold text-amber-950">Produce Scan Alert</div>
+                    <p className="leading-relaxed text-amber-800">{error}</p>
+                  </div>
                 </div>
               )}
             </motion.div>
@@ -1655,8 +1739,31 @@ export default function App() {
                   )}
                 </div>
 
+                {/* Alternative Candidates / Quick Switch Chips */}
+                {prediction.alternative_candidates && prediction.alternative_candidates.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-center gap-1.5 mt-2 mb-1">
+                    <span className="text-[10px] font-semibold text-slate-400">Did you mean:</span>
+                    {prediction.alternative_candidates.map((alt) => (
+                      <button
+                        key={alt.type}
+                        onClick={() => handleCorrection(alt.type)}
+                        className="px-2.5 py-0.5 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-300 border border-slate-200/80 rounded-full text-xs font-semibold text-slate-600 transition-colors"
+                        title={alt.reason || `Switch to ${alt.label}`}
+                      >
+                        {alt.label}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setShowCorrection(!showCorrection)}
+                      className="px-2 py-0.5 text-xs text-[#0097B2] font-semibold hover:underline"
+                    >
+                      More...
+                    </button>
+                  </div>
+                )}
+
                 {nutrients && (
-                  <span className="text-[11px] text-slate-400 font-medium">
+                  <span className="text-[11px] text-slate-400 font-medium mt-1">
                     Estimated weight: <strong className="text-slate-600 font-semibold">{nutrients.weightG}g</strong>
                   </span>
                 )}
@@ -2160,6 +2267,13 @@ export default function App() {
                 confidence={0.95}
               />
 
+              {/* RAG Knowledge Engine & Circular Upcycling Advisor */}
+              <RAGKnowledgeAdvisor 
+                produceType={selectedHistoryItem.produceType}
+                qualityScore={selectedHistoryItem.qualityScore}
+                rulHours={selectedHistoryItem.rulHours}
+              />
+
               <div className="bg-white rounded-4xl p-8 shadow-sm border border-slate-100 space-y-6">
                 <div className="flex justify-between items-end">
                   <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
@@ -2239,6 +2353,86 @@ export default function App() {
             onClose={() => setShowLocationModal(false)}
             onSelect={handleManualLocation}
           />
+        )}
+      </AnimatePresence>
+
+      {/* Invalid Produce & Human Detection Alert Dialog */}
+      <AnimatePresence>
+        {invalidProduceAlert && (
+          <div 
+            id="invalid-produce-dialog-backdrop"
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-5"
+          >
+            <motion.div
+              id="invalid-produce-alert-dialog"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="invalid-produce-title"
+              aria-describedby="invalid-produce-desc"
+              initial={{ opacity: 0, scale: 0.92, y: 10, x: 0 }}
+              animate={{ 
+                opacity: 1, 
+                scale: 1, 
+                y: 0,
+                x: [0, -8, 8, -6, 6, -3, 3, 0]
+              }}
+              transition={{
+                x: { duration: 0.5, ease: "easeInOut", delay: 0.05 },
+                opacity: { duration: 0.2 },
+                scale: { duration: 0.2 },
+                y: { duration: 0.2 }
+              }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-3xl p-6 sm:p-7 max-w-sm w-full shadow-2xl border border-slate-100 flex flex-col items-center text-center gap-4"
+            >
+              {invalidProduceAlert.isHuman ? (
+                <div className="w-16 h-16 rounded-3xl bg-rose-50 text-rose-600 border border-rose-200/80 flex items-center justify-center shadow-xs">
+                  <UserX size={32} className="stroke-[2.2]" />
+                </div>
+              ) : (
+                <div className="w-16 h-16 rounded-3xl bg-amber-50 text-amber-600 border border-amber-200/60 flex items-center justify-center shadow-xs">
+                  <AlertTriangle size={32} className="stroke-[2.2]" />
+                </div>
+              )}
+              
+              <div className="space-y-2">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-100 text-slate-700">
+                  {invalidProduceAlert.isHuman ? "Human Detected" : "Validation Notice"}
+                </div>
+                <h3 id="invalid-produce-title" className="text-lg font-extrabold text-slate-900">
+                  {invalidProduceAlert.title}
+                </h3>
+                <p id="invalid-produce-desc" className="text-sm font-medium text-slate-600 leading-relaxed">
+                  {invalidProduceAlert.message}
+                </p>
+                {invalidProduceAlert.tip && (
+                  <p className="text-xs font-semibold text-emerald-700 bg-emerald-50 rounded-xl p-2.5 border border-emerald-100/80 mt-2">
+                    {invalidProduceAlert.tip}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2.5 w-full pt-1">
+                <button
+                  id="invalid-produce-dismiss-btn"
+                  onClick={() => setInvalidProduceAlert(null)}
+                  className="w-full py-3.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm rounded-2xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2"
+                >
+                  Got It
+                </button>
+                <button
+                  id="invalid-produce-retry-scan-btn"
+                  onClick={() => {
+                    setInvalidProduceAlert(null);
+                    startScanner();
+                  }}
+                  className="w-full py-3.5 px-4 bg-emerald-50 hover:bg-emerald-100 text-[#1AAB5F] font-bold text-sm rounded-2xl border border-emerald-200/80 transition-all active:scale-95 flex items-center justify-center gap-1.5"
+                >
+                  <Camera size={16} /> {invalidProduceAlert.isHuman ? "Scan Produce" : "Try Again"}
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
     </div>

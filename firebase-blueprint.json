@@ -12,7 +12,11 @@
         "temperatureK": { "type": "number" },
         "humidity": { "type": "number" },
         "timestamp": { "type": "string", "format": "date-time" },
-        "imageUrl": { "type": "string" }
+        "imageUrl": { "type": "string" },
+        "isCorrect": { "type": "boolean" },
+        "correctedType": { "type": "string" },
+        "alertEnabled": { "type": "boolean" },
+        "alertThreshold": { "type": "number" }
       },
       "required": ["userId", "produceType", "qualityScore", "rulHours", "timestamp"]
     }

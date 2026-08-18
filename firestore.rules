@@ -19,6 +19,11 @@ service cloud.firestore {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    // Connection Health-Check Document
+    match /test/{docId} {
+      allow read: if true;
+    }
+
     // --- Prediction Model Validation ---
     function isValidPrediction(data) {
       return data.keys().hasAll(['userId', 'produceType', 'qualityScore', 'rulHours', 'timestamp'])
@@ -27,7 +32,7 @@ service cloud.firestore {
              && data.produceType is string && data.produceType.size() <= 50
              && data.qualityScore is number 
              && data.rulHours is number
-             && data.timestamp is timestamp;
+             && (data.timestamp is timestamp || data.timestamp == request.time);
     }
 
     // --- Collection: Predictions ---
@@ -38,8 +43,7 @@ service cloud.firestore {
       
       allow create: if isSignedIn() 
                     && isValidId(predictionId)
-                    && isValidPrediction(request.resource.data)
-                    && (request.resource.data.timestamp == request.time || request.resource.data.timestamp == request.resource.data.timestamp); // Allow server timestamp
+                    && isValidPrediction(request.resource.data);
       
       allow update: if isSignedIn() && resource.data.userId == request.auth.uid;
       allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
