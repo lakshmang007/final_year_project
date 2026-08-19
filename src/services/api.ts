@@ -2,9 +2,10 @@
  * API Service for BioFresh-CV
  * 
  * This file talks to two main services:
- * 1. Google Gemini AI (Vision Model) - proxied securely via /api/predict
+ * 1. Google Gemini AI (Vision Model) - to see and identify the produce in your picture
  * 2. Open-Meteo Weather API - to get local temperature, humidity, and moisture
  */
+import { GoogleGenAI } from "@google/genai";
 
 // Structure for alternative produce options (like if an avocado looks like a mango)
 export interface AlternativeCandidate {
@@ -15,11 +16,6 @@ export interface AlternativeCandidate {
 
 // Structure for what Gemini AI returns after looking at your photo
 export interface PredictionResult {
-  isInvalid?: boolean;
-  is_produce?: boolean;
-  is_human?: boolean;
-  message?: string;
-  details?: string;
   produce_type: string; // What produce it is (e.g. 'banana', 'avocado')
   quality_score: number; // Freshness score from 0.0 (rotten) to 1.0 (super fresh)
   confidence_score?: number; // How sure the AI is about its guess (0.0 to 1.0)
@@ -51,45 +47,75 @@ export interface ArchiveWeatherData {
   };
 }
 
+// Connect to the Google Gemini AI library using your API key
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
 /**
  * predictProduce
  * 
- * Takes a picture (in base64 format), sends it to our server-side /api/predict proxy,
- * which securely runs Google Gemini Multimodal AI to identify the fruit/vegetable, its freshness score,
+ * Takes a picture (in base64 format), sends it to Gemini AI,
+ * and asks the AI to identify the fruit/vegetable, its freshness score,
  * and possible lookalikes.
  */
 export async function predictProduce(imageBase64: string): Promise<PredictionResult> {
   try {
-    const response = await fetch("/api/predict", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
+    // Clean up the base64 image data string (removes the 'data:image/jpeg;base64,' prefix if present)
+    const base64Data = imageBase64.split(",")[1] || imageBase64;
+
+    // Wrap the image into the format Gemini AI expects
+    const imagePart = {
+      inlineData: {
+        mimeType: "image/jpeg",
+        data: base64Data,
       },
-      body: JSON.stringify({ imageBase64 })
+    };
+    
+    // Clear prompt instructing the AI on what to detect and how to format the answer
+    const textPart = {
+      text: `Analyze this image of fresh produce with extreme biochemical precision.
+      1. Identify the specific primary produce item. Pay intense attention to key distinctions:
+         - Avocado: Dark green or black/purple pebbled/bumpy skin (Hass) or glossy bright green pear-shape (Fuerte). Pear/oval shape with distinct stem end.
+         - Mango: Smooth, glossy skin with a green, red, orange, or yellow blush. Oblong or kidney shape. Smooth texture without dark pebbled bumps.
+         - Banana: Curved, elongated, yellow or green skin with longitudinal ridges or spots.
+         - Tomato: Smooth red, yellow, or green skin, spherical, green calyx/stem star at top.
+         - Apple: Round, firm, shiny red/green/yellow skin with indented stem cavity.
+         - Orange: Spherical, bright orange, textured porous citrus peel.
+         - Lemon: Ellipsoidal/oval, bright yellow skin, distinct nipple tips.
+         - Leafy Greens: Spinach, kale, lettuce leaves.
+         - Papaya / Lime / Cucumber / Bell Pepper.
+      2. Produce items can look visually ambiguous (e.g., an dark avocado vs. a green/blushed mango, or a green apple vs. tomato).
+         Provide up to 3 visually similar alternative candidates in 'alternative_candidates' that this item might also be if it was misidentified.
+      3. Assign a quality score from 0.0 (rotten) to 1.0 (peak freshness).
+      4. Assign a confidence_score between 0.0 and 1.0 for your top identification.
+
+      Return ONLY a JSON object:
+      {
+        "produce_type": "string (lowercase snake_case)",
+        "quality_score": float,
+        "confidence_score": float,
+        "alternative_candidates": [
+          {"type": "avocado", "label": "Avocado", "reason": "Dark or green oval shape with pebbled skin"},
+          {"type": "mango", "label": "Mango", "reason": "Smooth oblong tropical fruit"}
+        ]
+      }`,
+    };
+
+    // Ask Gemini AI to generate the analysis
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: { parts: [imagePart, textPart] },
+      config: {
+        responseMimeType: "application/json" // Asks Gemini to return pure JSON
+      }
     });
 
-    if (!response.ok) {
-      let errMsg = "AI produce analysis failed";
-      try {
-        const errJson = await response.json();
-        if (errJson.message && errJson.details) {
-          errMsg = `⚠️ ${errJson.message}: ${errJson.details}`;
-        } else if (errJson.message) {
-          errMsg = `⚠️ ${errJson.message}`;
-        } else {
-          errMsg = errJson.error || errMsg;
-        }
-      } catch {
-        const text = await response.text();
-        errMsg = text.substring(0, 150) || errMsg;
-      }
-      throw new Error(errMsg);
-    }
-
-    const data: PredictionResult = await response.json();
-    return data;
+    const text = response.text;
+    if (!text) throw new Error("Empty response from Gemini");
+    
+    // Parse the JSON string into our PredictionResult object
+    return JSON.parse(text);
   } catch (error: any) {
-    console.error("Gemini Vision Prediction Error:", error);
+    console.error("Gemini Frontend Error:", error);
     throw error;
   }
 }

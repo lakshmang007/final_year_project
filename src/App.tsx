@@ -13,7 +13,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2, Upload, FileSpreadsheet, Download, SwitchCamera, Zap, ZapOff, Image as ImageIcon, UserX } from 'lucide-react';
+import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, ChevronRight, X, Loader2, RefreshCw, LogIn, LogOut, User as UserIcon, Bell, ThumbsUp, ThumbsDown, AlertTriangle, MapPin, Lock, Unlock, Clock, Trash2, Upload } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { auth, loginWithGoogle, checkRedirectLogin, loginAnonymously } from './lib/firebase';
@@ -399,25 +399,12 @@ export default function App() {
   const [fetchingHistory, setFetchingHistory] = useState(false);
   const [selectedHistoryItem, setSelectedHistoryItem] = useState<PredictionHistoryItem | null>(null);
   
-  // Produce Validation Alert State (Supports both Face / Human and General Non-Produce)
-  const [invalidProduceAlert, setInvalidProduceAlert] = useState<{
-    isHuman: boolean;
-    title: string;
-    message: string;
-    tip?: string;
-  } | null>(null);
-  
   // HTML Refs for Camera feed, Canvas screenshot, and File upload
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const nativeCameraInputRef = useRef<HTMLInputElement>(null);
-  const galleryInputRef = useRef<HTMLInputElement>(null);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
-  const [hasTorch, setHasTorch] = useState(false);
-  const [torchOn, setTorchOn] = useState(false);
 
   // --- Lifecycle Effects ---
 
@@ -669,130 +656,6 @@ export default function App() {
       stream.getTracks().forEach(track => track.stop());
       videoRef.current.srcObject = null;
     }
-    setTorchOn(false);
-    setHasTorch(false);
-  };
-
-  /**
-   * initCameraStream
-   * 
-   * Robust camera initialization with multiple fallback constraint cascades specifically designed for mobile devices.
-   */
-  const initCameraStream = async (targetFacing: 'environment' | 'user' = facingMode) => {
-    setCameraError(null);
-    try {
-      // Release any previously held stream
-      if (cameraStream) {
-        cameraStream.getTracks().forEach(t => t.stop());
-        setCameraStream(null);
-      }
-
-      if (!navigator?.mediaDevices?.getUserMedia) {
-        throw new Error("getUserMedia is not supported on this browser.");
-      }
-
-      let stream: MediaStream | null = null;
-      let lastErr: any = null;
-
-      // Cascading constraint tiers for maximum mobile & desktop compatibility
-      const constraintCandidates: MediaStreamConstraints[] = [
-        {
-          video: {
-            facingMode: { ideal: targetFacing },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 }
-          },
-          audio: false
-        },
-        {
-          video: {
-            facingMode: targetFacing
-          },
-          audio: false
-        },
-        {
-          video: {
-            facingMode: targetFacing === 'environment' ? 'user' : 'environment'
-          },
-          audio: false
-        },
-        {
-          video: true,
-          audio: false
-        }
-      ];
-
-      for (const constraints of constraintCandidates) {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-          if (stream) break;
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-
-      if (!stream) {
-        throw lastErr || new Error("Failed to initialize camera video stream");
-      }
-
-      setCameraStream(stream);
-      setFacingMode(targetFacing);
-
-      // Inspect video track for torch/flashlight capability
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        const capabilities: any = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
-        setHasTorch(Boolean(capabilities && 'torch' in capabilities));
-      }
-
-      if (videoRef.current) {
-        const video = videoRef.current;
-        video.srcObject = stream;
-        video.setAttribute('playsinline', 'true');
-        video.setAttribute('webkit-playsinline', 'true');
-        video.muted = true;
-        try {
-          await video.play();
-        } catch (playErr) {
-          console.warn("Video autoplay caught:", playErr);
-        }
-      }
-    } catch (err: any) {
-      console.error("Camera access failed:", err);
-      setCameraError(
-        "Camera stream blocked or unavailable in this browser. Tap 'Open Phone Camera' below to take a picture directly!"
-      );
-    }
-  };
-
-  /**
-   * toggleCameraFacing
-   * 
-   * Flips between rear (environment) and front (selfie) cameras.
-   */
-  const toggleCameraFacing = async () => {
-    const nextMode = facingMode === 'environment' ? 'user' : 'environment';
-    await initCameraStream(nextMode);
-  };
-
-  /**
-   * toggleTorch
-   * 
-   * Toggles hardware torch/flashlight on supported mobile devices.
-   */
-  const toggleTorch = async () => {
-    if (!cameraStream) return;
-    const videoTrack = cameraStream.getVideoTracks()[0];
-    if (videoTrack) {
-      try {
-        const nextState = !torchOn;
-        // @ts-ignore
-        await videoTrack.applyConstraints({ advanced: [{ torch: nextState }] });
-        setTorchOn(nextState);
-      } catch (err) {
-        console.warn("Torch toggle error:", err);
-      }
-    }
   };
 
   /**
@@ -811,11 +674,57 @@ export default function App() {
    * Turns on the webcam/back-camera when entering 'scanner' view, and turns it off when leaving.
    */
   useEffect(() => {
+    let activeTracks: MediaStreamTrack[] = [];
+    let isCancelled = false;
+
     if (view === 'scanner') {
-      initCameraStream(facingMode);
+      const startCamera = async () => {
+        try {
+          let stream: MediaStream;
+          try {
+            // Prefer back camera on mobile phones ('environment')
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: { ideal: 'environment' } }
+            });
+          } catch {
+            // Fallback to any default camera (like desktop webcam)
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          }
+
+          if (isCancelled) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+          }
+
+          activeTracks = stream.getTracks();
+          setCameraStream(stream);
+
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.muted = true;
+            try {
+              await videoRef.current.play();
+            } catch (playErr) {
+              console.warn("Video play promise error:", playErr);
+            }
+          }
+        } catch (err: any) {
+          console.error("Camera access error:", err);
+          if (!isCancelled) {
+            setCameraError("Camera permission blocked or unavailable in iframe. Use 'Upload Photo' to select an image!");
+          }
+        }
+      };
+
+      startCamera();
     } else {
-      stopScanner();
+      setCameraStream(null);
     }
+
+    return () => {
+      isCancelled = true;
+      activeTracks.forEach(track => track.stop());
+    };
   }, [view]);
 
   /**
@@ -824,59 +733,11 @@ export default function App() {
   useEffect(() => {
     if (view === 'scanner' && videoRef.current && cameraStream) {
       const v = videoRef.current;
-      if (v.srcObject !== cameraStream) {
-        v.srcObject = cameraStream;
-      }
-      v.setAttribute('playsinline', 'true');
-      v.setAttribute('webkit-playsinline', 'true');
+      v.srcObject = cameraStream;
       v.muted = true;
       v.play().catch(e => console.warn("Video play error:", e));
     }
   }, [view, cameraStream]);
-
-  /**
-   * compressImageBase64
-   * 
-   * Downscales raw high-resolution photos (e.g., from 48MP phone cameras) to a maximum dimension of 1280px.
-   */
-  const compressImageBase64 = (dataUrl: string, maxDimension = 1280, quality = 0.85): Promise<string> => {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        let { width, height } = img;
-        if (width <= maxDimension && height <= maxDimension) {
-          resolve(dataUrl);
-          return;
-        }
-
-        if (width > height) {
-          if (width > maxDimension) {
-            height = Math.round((height * maxDimension) / width);
-            width = maxDimension;
-          }
-        } else {
-          if (height > maxDimension) {
-            width = Math.round((width * maxDimension) / height);
-            height = maxDimension;
-          }
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(dataUrl);
-          return;
-        }
-
-        ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
-    });
-  };
 
   /**
    * processImageAndPredict
@@ -888,16 +749,13 @@ export default function App() {
    * 4. Look up zero-waste recipes if near expiry
    * 5. Save the scan result to Firestore database
    */
-  const processImageAndPredict = async (rawImageData: string) => {
+  const processImageAndPredict = async (imageData: string) => {
     setLoading(true);
     setError(null);
+    setCurrentImage(imageData);
     stopScanner();
 
     try {
-      // 0. Ensure image is optimized for network transport
-      const imageData = await compressImageBase64(rawImageData);
-      setCurrentImage(imageData);
-
       // 1. Get Lat/Lon coordinates for ambient weather
       let lat = 0, lon = 0;
       const savedLat = localStorage.getItem('biofresh_lat');
@@ -923,35 +781,6 @@ export default function App() {
         predictProduce(imageData),
         fetchWeather(lat, lon)
       ]);
-
-      // Strict validation check: If Gemini or vision detector determines this is a human/face or invalid non-produce
-      if (predResult.isInvalid === true || predResult.is_produce === false || predResult.produce_type === 'unknown' || predResult.is_human === true) {
-        const isHuman = predResult.is_human === true || 
-                        /human|face|person|selfie|portrait|hands/i.test(predResult.message || "") || 
-                        /human|face|person|selfie|portrait|hands/i.test(predResult.details || "");
-
-        if (isHuman) {
-          setInvalidProduceAlert({
-            isHuman: true,
-            title: "Human / Face Detected",
-            message: "You clicked or scanned a person. BioFresh-CV requires a photo of fresh produce (e.g. apple, banana, avocado, tomato, leafy greens) to calculate freshness and shelf life.",
-            tip: "Tip: Please point your camera directly at fresh fruit or vegetables instead."
-          });
-          setError("Human / face detected. Please take a photo of fresh produce.");
-        } else {
-          setInvalidProduceAlert({
-            isHuman: false,
-            title: "Unrecognized Produce",
-            message: predResult.message || "We couldn't identify produce in this image. Please take a clear picture of a single fruit or vegetable.",
-            tip: "Tip: Ensure good lighting and place the produce item in the center of the frame."
-          });
-          setError(predResult.message || "Unrecognized produce. Please try again.");
-        }
-
-        setView('home');
-        setLoading(false);
-        return; // Do NOT proceed with Arrhenius prediction or saving to database
-      }
 
       // 3. Arrhenius Engine Logic with Storage Environment adjustment
       const storageEnv = localStorage.getItem('biofresh_storage_env') || 'room';
@@ -1066,39 +895,15 @@ export default function App() {
   };
 
   /**
-   * triggerNativeCamera
-   * 
-   * Directly triggers the smartphone's hardware camera app (with flashlight, zoom, and native resolution).
-   */
-  const triggerNativeCamera = () => {
-    if (nativeCameraInputRef.current) {
-      nativeCameraInputRef.current.value = '';
-      nativeCameraInputRef.current.click();
-    }
-  };
-
-  /**
-   * triggerGalleryUpload
-   * 
-   * Opens the photo gallery picker dialog.
-   */
-  const triggerGalleryUpload = () => {
-    if (galleryInputRef.current) {
-      galleryInputRef.current.value = '';
-      galleryInputRef.current.click();
-    } else if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-      fileInputRef.current.click();
-    }
-  };
-
-  /**
    * triggerFileUpload
    * 
    * Opens the file picker dialog.
    */
   const triggerFileUpload = () => {
-    triggerGalleryUpload();
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
   };
 
   /**
@@ -1436,22 +1241,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Hidden file inputs for hardware camera and photo gallery */}
-              <input 
-                type="file" 
-                ref={nativeCameraInputRef} 
-                accept="image/*" 
-                capture="environment"
-                onChange={handleFileUpload} 
-                className="hidden" 
-              />
-              <input 
-                type="file" 
-                ref={galleryInputRef} 
-                accept="image/*" 
-                onChange={handleFileUpload} 
-                className="hidden" 
-              />
+              {/* Hidden file input for photo upload fallback */}
               <input 
                 type="file" 
                 ref={fileInputRef} 
@@ -1462,34 +1252,21 @@ export default function App() {
 
               {user ? (
                 <>
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-2 gap-3">
-                      <button 
-                        onClick={triggerNativeCamera}
-                        className="bg-[#1AAB5F] hover:bg-[#158a4d] text-white py-4.5 px-4 rounded-3xl flex flex-col items-center justify-center gap-2 font-bold text-sm shadow-lg shadow-emerald-900/10 transition-all hover:scale-[1.01] active:scale-95 border border-emerald-600/30"
-                      >
-                        <div className="w-12 h-12 rounded-2xl bg-white/20 flex items-center justify-center">
-                          <Camera size={24} className="text-white" />
-                        </div>
-                        <div className="text-center">
-                          <div className="font-extrabold text-sm sm:text-base">Snap Photo</div>
-                          <div className="text-[10px] font-medium text-emerald-100">Take a photo of produce</div>
-                        </div>
-                      </button>
-
-                      <button 
-                        onClick={triggerGalleryUpload}
-                        className="bg-white hover:bg-slate-50 text-slate-700 py-4.5 px-4 rounded-3xl flex flex-col items-center justify-center gap-2 font-bold text-sm border border-slate-200 shadow-sm transition-all hover:scale-[1.01] active:scale-95"
-                      >
-                        <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-600">
-                          <Upload size={24} />
-                        </div>
-                        <div className="text-center">
-                          <div className="font-extrabold text-sm sm:text-base text-slate-800">Upload Photo</div>
-                          <div className="text-[10px] font-medium text-slate-400">Choose from gallery or files</div>
-                        </div>
-                      </button>
-                    </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={startScanner}
+                      className="bg-[#1AAB5F] hover:bg-[#158a4d] text-white py-5 px-4 rounded-3xl flex items-center justify-center gap-2 font-bold text-base shadow-lg shadow-green-100 transition-all hover:scale-[1.02] active:scale-95"
+                    >
+                      <Camera size={22} />
+                      Scan Camera
+                    </button>
+                    <button 
+                      onClick={triggerFileUpload}
+                      className="bg-slate-800 hover:bg-slate-900 text-white py-5 px-4 rounded-3xl flex items-center justify-center gap-2 font-bold text-base shadow-lg shadow-slate-200 transition-all hover:scale-[1.02] active:scale-95"
+                    >
+                      <Upload size={22} />
+                      Upload Photo
+                    </button>
                   </div>
 
                   {/* Active Reminders Section */}
@@ -1548,14 +1325,9 @@ export default function App() {
               )}
 
               {error && (
-                <div className="p-4.5 bg-amber-50 text-amber-900 rounded-3xl border border-amber-200/70 text-xs sm:text-sm font-medium flex items-start gap-3 shadow-xs">
-                  <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5 font-bold">
-                    <AlertTriangle size={18} />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="font-bold text-amber-950">Produce Scan Alert</div>
-                    <p className="leading-relaxed text-amber-800">{error}</p>
-                  </div>
+                <div className="p-4 bg-red-50 text-red-600 rounded-2xl border border-red-100 text-sm font-medium flex items-center gap-2">
+                  <Info size={16} />
+                  {error}
                 </div>
               )}
             </motion.div>
@@ -1567,134 +1339,86 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black z-[60] flex flex-col justify-between"
+              className="fixed inset-0 bg-black z-[60] flex flex-col"
             >
-              {/* Scanner Top Bar */}
-              <div className="relative z-30 pt-6 px-5 flex justify-between items-center bg-gradient-to-b from-black/80 to-transparent">
-                <button 
-                  onClick={reset} 
-                  className="p-3 bg-white/15 backdrop-blur-md rounded-full text-white hover:bg-white/25 active:scale-95 transition-all"
-                  title="Close scanner"
-                >
-                  <X size={20} />
+              <div className="absolute top-8 left-6 right-6 flex justify-between items-center z-10">
+                <button onClick={reset} className="p-2 bg-white/10 backdrop-blur rounded-full text-white">
+                  <X size={24} />
                 </button>
-
-                <div className="px-3.5 py-1.5 bg-black/40 backdrop-blur-md border border-white/10 rounded-full text-white/90 text-xs font-semibold flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>Align produce in frame</span>
+                <div className="px-4 py-2 bg-white/10 backdrop-blur rounded-full text-white text-sm font-medium">
+                  Center Produce in Frame
                 </div>
-
-                <div className="flex items-center gap-2">
-                  {hasTorch && (
-                    <button 
-                      onClick={toggleTorch} 
-                      className={`p-3 rounded-full text-white backdrop-blur-md transition-all active:scale-95 ${
-                        torchOn ? 'bg-amber-400 text-slate-950 font-bold' : 'bg-white/15 hover:bg-white/25'
-                      }`}
-                      title={torchOn ? "Turn off Flashlight" : "Turn on Flashlight"}
-                    >
-                      {torchOn ? <Zap size={18} /> : <ZapOff size={18} />}
-                    </button>
-                  )}
-                  <button 
-                    onClick={toggleCameraFacing} 
-                    className="p-3 bg-white/15 backdrop-blur-md rounded-full text-white hover:bg-white/25 active:scale-95 transition-all"
-                    title="Flip camera (Front/Back)"
-                  >
-                    <SwitchCamera size={18} />
-                  </button>
-                </div>
+                <button onClick={triggerFileUpload} className="p-2 bg-white/10 backdrop-blur rounded-full text-white flex items-center justify-center" title="Upload Photo">
+                  <Upload size={20} />
+                </button>
               </div>
 
-              {/* Viewfinder Area */}
               <div className="flex-1 relative overflow-hidden bg-slate-950 flex items-center justify-center">
                 <video 
-                  ref={videoRef}
+                  ref={(el) => {
+                    // @ts-ignore
+                    videoRef.current = el;
+                    if (el && cameraStream) {
+                      if (el.srcObject !== cameraStream) {
+                        el.srcObject = cameraStream;
+                      }
+                      el.muted = true;
+                      el.play().catch(e => console.warn("Video play error:", e));
+                    }
+                  }}
                   autoPlay 
                   playsInline 
                   muted
+                  onLoadedMetadata={(e) => {
+                    e.currentTarget.muted = true;
+                    e.currentTarget.play().catch(console.warn);
+                  }}
+                  onCanPlay={(e) => {
+                    e.currentTarget.muted = true;
+                    e.currentTarget.play().catch(console.warn);
+                  }}
                   className="w-full h-full object-cover min-h-[300px]"
                 />
-
-                {/* Target Frame Reticle Overlay */}
-                <div className="absolute inset-0 pointer-events-none flex items-center justify-center p-8">
-                  <div className="w-64 h-64 sm:w-80 sm:h-80 border-2 border-emerald-400/60 rounded-3xl relative flex items-center justify-center shadow-[0_0_30px_rgba(16,185,129,0.15)]">
-                    <div className="absolute top-2 left-2 w-4 h-4 border-t-2 border-l-2 border-emerald-400 rounded-tl" />
-                    <div className="absolute top-2 right-2 w-4 h-4 border-t-2 border-r-2 border-emerald-400 rounded-tr" />
-                    <div className="absolute bottom-2 left-2 w-4 h-4 border-b-2 border-l-2 border-emerald-400 rounded-bl" />
-                    <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-emerald-400 rounded-br" />
-                    
-                    {/* Subtle scanning bar */}
-                    <div className="w-full h-0.5 bg-gradient-to-r from-transparent via-emerald-400 to-transparent absolute top-1/2 -translate-y-1/2 opacity-70 animate-pulse" />
-                  </div>
-                </div>
                 
-                {/* Fallback Banner if WebRTC blocked on phone/iframe */}
                 {cameraError && (
-                  <div className="absolute inset-x-4 top-20 bg-slate-900/95 backdrop-blur-md border border-amber-500/30 p-5 rounded-3xl text-center space-y-3 z-30 shadow-2xl">
-                    <div className="w-10 h-10 rounded-2xl bg-amber-500/10 text-amber-400 flex items-center justify-center mx-auto">
-                      <Camera size={20} />
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-white font-bold text-sm">Browser Camera Stream Unavailable</p>
-                      <p className="text-slate-400 text-xs">{cameraError}</p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 pt-2">
-                      <button 
-                        onClick={triggerNativeCamera}
-                        className="py-3 px-3 bg-[#1AAB5F] hover:bg-[#158a4d] text-white text-xs font-bold rounded-2xl flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950 transition-all active:scale-95"
-                      >
-                        <Camera size={16} /> Open Phone Camera
-                      </button>
-                      <button 
-                        onClick={triggerGalleryUpload}
-                        className="py-3 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-2xl flex items-center justify-center gap-1.5 border border-slate-700 transition-all active:scale-95"
-                      >
-                        <ImageIcon size={16} /> Choose Photo
-                      </button>
-                    </div>
+                  <div className="absolute inset-x-6 top-24 bg-slate-900/90 backdrop-blur border border-slate-800 p-4 rounded-2xl text-center space-y-3 z-20">
+                    <p className="text-amber-400 text-xs font-semibold">{cameraError}</p>
+                    <button 
+                      onClick={triggerFileUpload}
+                      className="px-4 py-2 bg-[#1AAB5F] hover:bg-[#158a4d] text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 mx-auto"
+                    >
+                      <Upload size={14} /> Choose Image File
+                    </button>
                   </div>
                 )}
               </div>
 
               <canvas ref={canvasRef} className="hidden" />
 
-              {/* Scanner Bottom Action Controls */}
-              <div className="relative z-30 pb-10 pt-6 px-6 bg-gradient-to-t from-black/90 via-black/50 to-transparent flex flex-col items-center gap-4">
-                <p className="text-white/70 text-xs font-medium tracking-wide">Hold steady & tap capture</p>
+              <div className="absolute bottom-12 left-0 right-0 flex flex-col items-center gap-6 z-10">
+                <p className="text-white/60 text-sm font-medium">Auto-calibrating vision filters...</p>
                 
-                <div className="w-full max-w-xs flex items-center justify-between">
-                  {/* Photo Gallery Picker */}
+                <div className="flex items-center gap-6">
                   <button 
-                    onClick={triggerGalleryUpload}
-                    className="w-13 h-13 bg-white/15 backdrop-blur-md hover:bg-white/25 text-white rounded-full flex flex-col items-center justify-center transition-all active:scale-90"
-                    title="Upload image from device"
+                    onClick={triggerFileUpload}
+                    className="w-12 h-12 bg-white/10 backdrop-blur hover:bg-white/20 text-white rounded-full flex items-center justify-center transition-colors"
+                    title="Upload image file"
                   >
-                    <ImageIcon size={20} />
-                    <span className="text-[9px] font-semibold text-white/80 mt-0.5">Gallery</span>
+                    <Upload size={20} />
                   </button>
 
-                  {/* Main Shutter Button */}
                   <button 
                     onClick={captureAndPredict}
                     disabled={loading}
-                    className="w-20 h-20 bg-white rounded-full flex items-center justify-center border-4 border-white/40 shadow-xl group active:scale-90 transition-transform"
-                    title="Capture photo"
+                    className="w-20 h-20 bg-white rounded-full flex items-center justify-center border-4 border-white/30 group active:scale-90 transition-transform"
+                    title="Capture image"
                   >
-                    <div className="w-16 h-16 bg-[#1AAB5F] rounded-full flex items-center justify-center text-white shadow-inner">
-                      {loading ? <Loader2 size={28} className="animate-spin" /> : <Camera size={28} />}
+                    <div className="w-16 h-16 bg-[#1AAB5F] rounded-full flex items-center justify-center text-white">
+                      {loading ? <Loader2 size={32} className="animate-spin" /> : <Camera size={32} />}
                     </div>
                   </button>
 
-                  {/* Phone Native Camera Direct Trigger */}
-                  <button 
-                    onClick={triggerNativeCamera}
-                    className="w-13 h-13 bg-white/15 backdrop-blur-md hover:bg-white/25 text-white rounded-full flex flex-col items-center justify-center transition-all active:scale-90"
-                    title="Take photo with native camera app"
-                  >
-                    <Camera size={20} className="text-emerald-400" />
-                    <span className="text-[9px] font-semibold text-white/80 mt-0.5">Native</span>
-                  </button>
+                  <div className="w-12 h-12" />
                 </div>
               </div>
             </motion.div>
@@ -1739,31 +1463,8 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Alternative Candidates / Quick Switch Chips */}
-                {prediction.alternative_candidates && prediction.alternative_candidates.length > 0 && (
-                  <div className="flex flex-wrap items-center justify-center gap-1.5 mt-2 mb-1">
-                    <span className="text-[10px] font-semibold text-slate-400">Did you mean:</span>
-                    {prediction.alternative_candidates.map((alt) => (
-                      <button
-                        key={alt.type}
-                        onClick={() => handleCorrection(alt.type)}
-                        className="px-2.5 py-0.5 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-300 border border-slate-200/80 rounded-full text-xs font-semibold text-slate-600 transition-colors"
-                        title={alt.reason || `Switch to ${alt.label}`}
-                      >
-                        {alt.label}
-                      </button>
-                    ))}
-                    <button
-                      onClick={() => setShowCorrection(!showCorrection)}
-                      className="px-2 py-0.5 text-xs text-[#0097B2] font-semibold hover:underline"
-                    >
-                      More...
-                    </button>
-                  </div>
-                )}
-
                 {nutrients && (
-                  <span className="text-[11px] text-slate-400 font-medium mt-1">
+                  <span className="text-[11px] text-slate-400 font-medium">
                     Estimated weight: <strong className="text-slate-600 font-semibold">{nutrients.weightG}g</strong>
                   </span>
                 )}
@@ -2047,15 +1748,6 @@ export default function App() {
                  </div>
                  
                  <div className="flex items-center gap-2">
-                   <a
-                     href="/BioFresh_CV_Research_Dataset.xlsx"
-                     download="BioFresh_CV_Research_Dataset.xlsx"
-                     className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-full text-xs font-bold transition-all active:scale-95 shadow-xs flex items-center gap-1.5"
-                     title="Download Research Dataset (.xlsx)"
-                   >
-                     <FileSpreadsheet size={15} className="text-emerald-600" />
-                     <span>Dataset (.xlsx)</span>
-                   </a>
                    <button 
                      onClick={() => loadHistory()} 
                      disabled={fetchingHistory}
@@ -2267,13 +1959,6 @@ export default function App() {
                 confidence={0.95}
               />
 
-              {/* RAG Knowledge Engine & Circular Upcycling Advisor */}
-              <RAGKnowledgeAdvisor 
-                produceType={selectedHistoryItem.produceType}
-                qualityScore={selectedHistoryItem.qualityScore}
-                rulHours={selectedHistoryItem.rulHours}
-              />
-
               <div className="bg-white rounded-4xl p-8 shadow-sm border border-slate-100 space-y-6">
                 <div className="flex justify-between items-end">
                   <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
@@ -2353,86 +2038,6 @@ export default function App() {
             onClose={() => setShowLocationModal(false)}
             onSelect={handleManualLocation}
           />
-        )}
-      </AnimatePresence>
-
-      {/* Invalid Produce & Human Detection Alert Dialog */}
-      <AnimatePresence>
-        {invalidProduceAlert && (
-          <div 
-            id="invalid-produce-dialog-backdrop"
-            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-5"
-          >
-            <motion.div
-              id="invalid-produce-alert-dialog"
-              role="alertdialog"
-              aria-modal="true"
-              aria-labelledby="invalid-produce-title"
-              aria-describedby="invalid-produce-desc"
-              initial={{ opacity: 0, scale: 0.92, y: 10, x: 0 }}
-              animate={{ 
-                opacity: 1, 
-                scale: 1, 
-                y: 0,
-                x: [0, -8, 8, -6, 6, -3, 3, 0]
-              }}
-              transition={{
-                x: { duration: 0.5, ease: "easeInOut", delay: 0.05 },
-                opacity: { duration: 0.2 },
-                scale: { duration: 0.2 },
-                y: { duration: 0.2 }
-              }}
-              exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="bg-white rounded-3xl p-6 sm:p-7 max-w-sm w-full shadow-2xl border border-slate-100 flex flex-col items-center text-center gap-4"
-            >
-              {invalidProduceAlert.isHuman ? (
-                <div className="w-16 h-16 rounded-3xl bg-rose-50 text-rose-600 border border-rose-200/80 flex items-center justify-center shadow-xs">
-                  <UserX size={32} className="stroke-[2.2]" />
-                </div>
-              ) : (
-                <div className="w-16 h-16 rounded-3xl bg-amber-50 text-amber-600 border border-amber-200/60 flex items-center justify-center shadow-xs">
-                  <AlertTriangle size={32} className="stroke-[2.2]" />
-                </div>
-              )}
-              
-              <div className="space-y-2">
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-100 text-slate-700">
-                  {invalidProduceAlert.isHuman ? "Human Detected" : "Validation Notice"}
-                </div>
-                <h3 id="invalid-produce-title" className="text-lg font-extrabold text-slate-900">
-                  {invalidProduceAlert.title}
-                </h3>
-                <p id="invalid-produce-desc" className="text-sm font-medium text-slate-600 leading-relaxed">
-                  {invalidProduceAlert.message}
-                </p>
-                {invalidProduceAlert.tip && (
-                  <p className="text-xs font-semibold text-emerald-700 bg-emerald-50 rounded-xl p-2.5 border border-emerald-100/80 mt-2">
-                    {invalidProduceAlert.tip}
-                  </p>
-                )}
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-2.5 w-full pt-1">
-                <button
-                  id="invalid-produce-dismiss-btn"
-                  onClick={() => setInvalidProduceAlert(null)}
-                  className="w-full py-3.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm rounded-2xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2"
-                >
-                  Got It
-                </button>
-                <button
-                  id="invalid-produce-retry-scan-btn"
-                  onClick={() => {
-                    setInvalidProduceAlert(null);
-                    startScanner();
-                  }}
-                  className="w-full py-3.5 px-4 bg-emerald-50 hover:bg-emerald-100 text-[#1AAB5F] font-bold text-sm rounded-2xl border border-emerald-200/80 transition-all active:scale-95 flex items-center justify-center gap-1.5"
-                >
-                  <Camera size={16} /> {invalidProduceAlert.isHuman ? "Scan Produce" : "Try Again"}
-                </button>
-              </div>
-            </motion.div>
-          </div>
         )}
       </AnimatePresence>
     </div>

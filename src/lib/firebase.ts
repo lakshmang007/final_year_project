@@ -100,9 +100,9 @@ async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     console.log("Firebase connection verified");
-  } catch (error: any) {
-    if (error instanceof Error && (error.message.includes('the client is offline') || error.message.includes('unavailable') || (error as any).code === 'unavailable')) {
-      console.warn("Firestore running in offline mode or initial connection pending:", error.message);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error("Please check your Firebase configuration.");
     }
   }
 }
