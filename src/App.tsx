@@ -776,7 +776,7 @@ export default function App() {
         }
       }
 
-      // 2. Parallel API calls (Predict produce with Gemini + Fetch Weather with Open-Meteo)
+      // 2. Parallel API calls (Predict produce with our trained model + Fetch Weather with Open-Meteo)
       const [predResult, weatherResult] = await Promise.all([
         predictProduce(imageData),
         fetchWeather(lat, lon)
@@ -1463,6 +1463,12 @@ export default function App() {
                   )}
                 </div>
 
+                {prediction.freshness_reliable === false && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200/70 rounded-xl px-3 py-1.5 mb-2 max-w-xs">
+                    Freshness was not assessed for {prediction.produce_type.replace('_', ' ')} (no fresh/rotten training images for it), so it is assumed fresh. Check it visually.
+                  </p>
+                )}
+
                 {nutrients && (
                   <span className="text-[11px] text-slate-400 font-medium">
                     Estimated weight: <strong className="text-slate-600 font-semibold">{nutrients.weightG}g</strong>
@@ -1580,7 +1586,11 @@ export default function App() {
                           { type: 'leafy_greens', label: '🥬 Leafy Greens' },
                           { type: 'papaya', label: '🍈 Papaya' },
                           { type: 'lime', label: '🟢 Lime' },
-                          { type: 'cucumber', label: '🥒 Cucumber' }
+                          { type: 'cucumber', label: '🥒 Cucumber' },
+                          { type: 'strawberry', label: '🍓 Strawberry' },
+                          { type: 'bell_pepper', label: '🫑 Bell Pepper' },
+                          { type: 'carrot', label: '🥕 Carrot' },
+                          { type: 'potato', label: '🥔 Potato' }
                         ].map(item => (
                           <button
                             key={item.type}

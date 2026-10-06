@@ -1,0 +1,27 @@
+{
+  "classes": [
+    "apple",
+    "avocado",
+    "banana",
+    "bell_pepper",
+    "carrot",
+    "cucumber",
+    "lemon",
+    "lime",
+    "mango",
+    "orange",
+    "papaya",
+    "potato",
+    "strawberry",
+    "tomato"
+  ],
+  "input_size": 224,
+  "input": "RGB float32 NCHW in [0,1]",
+  "architecture": "EfficientNet-B0 (ImageNet pretrained) + type head + freshness head",
+  "freshness_untrained_classes": [
+    "avocado",
+    "lemon",
+    "lime",
+    "papaya"
+  ]
+}

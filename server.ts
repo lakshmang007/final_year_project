@@ -6,17 +6,20 @@
  * 1. Serve the frontend React website.
  * 2. Fetch live weather & moisture telemetry for the user's location via Open-Meteo.
  * 3. Reverse-geocode coordinates into readable city names using OpenStreetMap Nominatim.
+ * 4. Run our own Kaggle-trained produce freshness model (/api/predict).
  */
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
+import { predictImage, modelAvailable } from "./src/server/produceModel";
 
 // Load environment variables from .env file
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Allow accepting large image payloads (up to 10 megabytes)
 app.use(express.json({ limit: '10mb' }));
@@ -95,6 +98,39 @@ app.get("/api/weather", async (req, res) => {
     console.error("Weather API error:", error);
     res.status(500).json({ error: error.message });
   }
+});
+
+/**
+ * POST /api/predict
+ *
+ * Body: { image: "<base64 or data URL>" }
+ * Runs the locally trained produce model (models/produce_model.onnx) and returns
+ * produce type, freshness-based quality score, confidence and alternatives.
+ */
+app.post("/api/predict", async (req, res) => {
+  try {
+    const { image } = req.body || {};
+    if (!image || typeof image !== "string") {
+      return res.status(400).json({ error: "Missing image in request body" });
+    }
+    res.json(await predictImage(image));
+  } catch (error: any) {
+    console.error("Prediction error:", error);
+    const status = modelAvailable() ? 500 : 503;
+    res.status(status).json({ error: error.message || "Prediction failed" });
+  }
+});
+
+/**
+ * GET /api/model/info
+ *
+ * Returns the trained model's classes and held-out test metrics (models/metrics.json).
+ */
+app.get("/api/model/info", (req, res) => {
+  const read = (f: string) => {
+    try { return JSON.parse(fs.readFileSync(path.join(process.cwd(), "models", f), "utf8")); } catch { return null; }
+  };
+  res.json({ available: modelAvailable(), labels: read("labels.json"), metrics: read("metrics.json") });
 });
 
 /**

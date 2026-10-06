@@ -148,6 +148,57 @@ export const PRODUCE_DATA: Record<string, ProduceMetadata> = {
       'Potassium': { value: 147, unit: 'mg' },
       'Cucurbitacins': { value: 0.8, unit: 'mg' },
     }
+  },
+  // A values below are calibrated so that a fresh item (Q=1) at 20°C lasts roughly its
+  // typical room-temperature shelf life: strawberry ~3 days, bell pepper ~5 days,
+  // carrot ~7 days, potato ~30 days. Nutrients: USDA FoodData Central (raw, per 100 g).
+  strawberry: {
+    A: 6.8e8,
+    Ea: 60000,
+    avgWeightG: 12,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 58.8, unit: 'mg' },
+      'Folate': { value: 24, unit: 'μg' },
+      'Potassium': { value: 153, unit: 'mg' },
+      'Dietary Fiber': { value: 2.0, unit: 'g' },
+      'Antioxidants': { value: 3.6, unit: 'mmol' },
+    }
+  },
+  bell_pepper: {
+    A: 4.1e8,
+    Ea: 60000,
+    avgWeightG: 120,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 127.7, unit: 'mg' },
+      'Vitamin A': { value: 157, unit: 'μg' },
+      'Vitamin B6': { value: 0.29, unit: 'mg' },
+      'Potassium': { value: 211, unit: 'mg' },
+      'Dietary Fiber': { value: 2.1, unit: 'g' },
+    }
+  },
+  carrot: {
+    A: 2.9e8,
+    Ea: 60000,
+    avgWeightG: 61,
+    nutrientsPer100g: {
+      'Vitamin A': { value: 835, unit: 'μg' },
+      'Vitamin K': { value: 13.2, unit: 'μg' },
+      'Potassium': { value: 320, unit: 'mg' },
+      'Dietary Fiber': { value: 2.8, unit: 'g' },
+      'Vitamin C': { value: 5.9, unit: 'mg' },
+    }
+  },
+  potato: {
+    A: 0.68e8,
+    Ea: 60000,
+    avgWeightG: 213,
+    nutrientsPer100g: {
+      'Potassium': { value: 425, unit: 'mg' },
+      'Vitamin C': { value: 19.7, unit: 'mg' },
+      'Vitamin B6': { value: 0.3, unit: 'mg' },
+      'Dietary Fiber': { value: 2.1, unit: 'g' },
+      'Magnesium': { value: 23, unit: 'mg' },
+    }
   }
 };
 

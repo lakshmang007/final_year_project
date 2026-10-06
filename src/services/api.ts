@@ -2,10 +2,9 @@
  * API Service for BioFresh-CV
  * 
  * This file talks to two main services:
- * 1. Google Gemini AI (Vision Model) - to see and identify the produce in your picture
+ * 1. Our backend's trained produce model - to identify the produce and its freshness
  * 2. Open-Meteo Weather API - to get local temperature, humidity, and moisture
  */
-import { GoogleGenAI } from "@google/genai";
 
 // Structure for alternative produce options (like if an avocado looks like a mango)
 export interface AlternativeCandidate {
@@ -14,12 +13,14 @@ export interface AlternativeCandidate {
   reason?: string;
 }
 
-// Structure for what Gemini AI returns after looking at your photo
+// Structure for what the produce model returns after looking at your photo
 export interface PredictionResult {
   produce_type: string; // What produce it is (e.g. 'banana', 'avocado')
   quality_score: number; // Freshness score from 0.0 (rotten) to 1.0 (super fresh)
   confidence_score?: number; // How sure the AI is about its guess (0.0 to 1.0)
   alternative_candidates?: AlternativeCandidate[]; // Other fruits/veggies it might be
+  model?: string; // Which model produced the prediction
+  freshness_reliable?: boolean; // False if the model had no fresh/rotten training data for this type
 }
 
 // Structure for current temperature and moisture readings
@@ -47,77 +48,25 @@ export interface ArchiveWeatherData {
   };
 }
 
-// Connect to the Google Gemini AI library using your API key
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-
 /**
  * predictProduce
- * 
- * Takes a picture (in base64 format), sends it to Gemini AI,
- * and asks the AI to identify the fruit/vegetable, its freshness score,
- * and possible lookalikes.
+ *
+ * Sends the picture (base64) to our backend (/api/predict), which runs the
+ * locally trained EfficientNet-B0 model (trained on Kaggle fresh/rotten produce
+ * datasets, see ml/train.py). Returns the produce type, a freshness-based
+ * quality score, confidence and look-alike alternatives.
  */
 export async function predictProduce(imageBase64: string): Promise<PredictionResult> {
-  try {
-    // Clean up the base64 image data string (removes the 'data:image/jpeg;base64,' prefix if present)
-    const base64Data = imageBase64.split(",")[1] || imageBase64;
-
-    // Wrap the image into the format Gemini AI expects
-    const imagePart = {
-      inlineData: {
-        mimeType: "image/jpeg",
-        data: base64Data,
-      },
-    };
-    
-    // Clear prompt instructing the AI on what to detect and how to format the answer
-    const textPart = {
-      text: `Analyze this image of fresh produce with extreme biochemical precision.
-      1. Identify the specific primary produce item. Pay intense attention to key distinctions:
-         - Avocado: Dark green or black/purple pebbled/bumpy skin (Hass) or glossy bright green pear-shape (Fuerte). Pear/oval shape with distinct stem end.
-         - Mango: Smooth, glossy skin with a green, red, orange, or yellow blush. Oblong or kidney shape. Smooth texture without dark pebbled bumps.
-         - Banana: Curved, elongated, yellow or green skin with longitudinal ridges or spots.
-         - Tomato: Smooth red, yellow, or green skin, spherical, green calyx/stem star at top.
-         - Apple: Round, firm, shiny red/green/yellow skin with indented stem cavity.
-         - Orange: Spherical, bright orange, textured porous citrus peel.
-         - Lemon: Ellipsoidal/oval, bright yellow skin, distinct nipple tips.
-         - Leafy Greens: Spinach, kale, lettuce leaves.
-         - Papaya / Lime / Cucumber / Bell Pepper.
-      2. Produce items can look visually ambiguous (e.g., an dark avocado vs. a green/blushed mango, or a green apple vs. tomato).
-         Provide up to 3 visually similar alternative candidates in 'alternative_candidates' that this item might also be if it was misidentified.
-      3. Assign a quality score from 0.0 (rotten) to 1.0 (peak freshness).
-      4. Assign a confidence_score between 0.0 and 1.0 for your top identification.
-
-      Return ONLY a JSON object:
-      {
-        "produce_type": "string (lowercase snake_case)",
-        "quality_score": float,
-        "confidence_score": float,
-        "alternative_candidates": [
-          {"type": "avocado", "label": "Avocado", "reason": "Dark or green oval shape with pebbled skin"},
-          {"type": "mango", "label": "Mango", "reason": "Smooth oblong tropical fruit"}
-        ]
-      }`,
-    };
-
-    // Ask Gemini AI to generate the analysis
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: { parts: [imagePart, textPart] },
-      config: {
-        responseMimeType: "application/json" // Asks Gemini to return pure JSON
-      }
-    });
-
-    const text = response.text;
-    if (!text) throw new Error("Empty response from Gemini");
-    
-    // Parse the JSON string into our PredictionResult object
-    return JSON.parse(text);
-  } catch (error: any) {
-    console.error("Gemini Frontend Error:", error);
-    throw error;
+  const response = await fetch('/api/predict', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image: imageBase64 }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `Prediction failed (HTTP ${response.status})`);
   }
+  return body as PredictionResult;
 }
 
 /**
@@ -132,7 +81,13 @@ export async function fetchWeather(lat: number, lon: number, startDate?: string,
   if (startDate && endDate) {
     url += `&start_date=${startDate}&end_date=${endDate}`;
   }
-  const response = await fetch(url);
-  if (!response.ok) throw new Error('Weather fetch failed');
-  return response.json();
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } catch (err) {
+    // Weather is optional: fall back to standard room conditions so the scan still works
+    console.warn('Weather fetch failed, using 20°C / 60% RH defaults:', err);
+    return { temperature_celsius: 20, temperature_kelvin: 293.15, humidity_percent: 60, source: 'default' };
+  }
 }

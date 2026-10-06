@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@source not "../ml";
+@source not "../models";
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;

@@ -8,10 +8,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "setup:ml": "python -m venv ml/.venv && ml/.venv/Scripts/python -m pip install -r ml/requirements.txt",
+    "train": "ml/.venv/Scripts/python ml/train.py"
   },
   "dependencies": {
-    "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vis.gl/react-google-maps": "^1.8.3",
     "@vitejs/plugin-react": "^5.0.4",
@@ -21,10 +22,12 @@
     "firebase": "^12.13.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "onnxruntime-node": "^1.30.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "react-markdown": "^10.1.0",
     "recharts": "^3.8.1",
+    "sharp": "^0.35.5",
     "tailwind-merge": "^3.5.0",
     "vite": "^6.2.3"
   },
