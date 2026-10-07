@@ -56,6 +56,9 @@ app.get("/api/weather", async (req, res) => {
       const archiveUrl = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&start_date=${start_date}&end_date=${end_date}&hourly=temperature_2m,relative_humidity_2m,soil_moisture_0_to_1cm`;
       const archiveRes = await fetch(archiveUrl);
       const archiveData = await archiveRes.json();
+      if (!archiveRes.ok) {
+        return res.status(502).json({ error: `Open-Meteo archive HTTP ${archiveRes.status}: ${archiveData.reason || ""}` });
+      }
 
       return res.json({
         type: "archive",
@@ -68,12 +71,17 @@ app.get("/api/weather", async (req, res) => {
 
     // 2. Real-time forecast & moisture content query via Open-Meteo
     const openMeteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,soil_moisture_0_to_1cm`;
-    const openMeteoRes = await fetch(openMeteoUrl);
-    const openMeteoData = await openMeteoRes.json();
-
-    const tempCelsius = openMeteoData.current?.temperature_2m ?? 25;
-    const humidityPercent = openMeteoData.current?.relative_humidity_2m ?? 60;
-    const soilMoisture = openMeteoData.current?.soil_moisture_0_to_1cm ?? null;
+    let current: any = null;
+    let weatherError = "";
+    try {
+      const openMeteoRes = await fetch(openMeteoUrl);
+      const openMeteoData = await openMeteoRes.json().catch(() => ({}));
+      current = openMeteoRes.ok ? openMeteoData.current : null;
+      // Shared hosting IPs (e.g. Render's free plan) are often rate-limited by Open-Meteo
+      if (!current) weatherError = `Open-Meteo HTTP ${openMeteoRes.status}: ${openMeteoData.reason || "no current data"}`;
+    } catch (e: any) {
+      weatherError = `Open-Meteo unreachable: ${e.message}`;
+    }
 
     // Optional reverse geocoding to find city / neighborhood name
     let locationName = `Lat: ${Number(lat).toFixed(2)}, Lon: ${Number(lon).toFixed(2)}`;
@@ -90,6 +98,15 @@ app.get("/api/weather", async (req, res) => {
     } catch {
       // If geocoding fails, fallback gracefully to coordinate string
     }
+
+    if (!current) {
+      // Don't invent numbers: tell the client, which then asks Open-Meteo directly from the browser
+      console.warn("Weather unavailable on server:", weatherError);
+      return res.status(502).json({ error: weatherError, location_name: locationName });
+    }
+    const tempCelsius = current.temperature_2m;
+    const humidityPercent = current.relative_humidity_2m;
+    const soilMoisture = current.soil_moisture_0_to_1cm ?? null;
 
     res.json({
       temperature_celsius: tempCelsius,

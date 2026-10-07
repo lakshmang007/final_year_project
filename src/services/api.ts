@@ -104,13 +104,40 @@ export async function fetchWeather(lat: number, lon: number, startDate?: string,
   if (startDate && endDate) {
     url += `&start_date=${startDate}&end_date=${endDate}`;
   }
+  let locationName: string | undefined;
   try {
     const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
+    const body = await response.json().catch(() => ({}));
+    if (response.ok) return body;
+    locationName = body.location_name; // the server still knows the city name
+    console.warn('Server weather unavailable, asking Open-Meteo directly:', body.error || response.status);
   } catch (err) {
-    // Weather is optional: fall back to standard room conditions so the scan still works
-    console.warn('Weather fetch failed, using 20°C / 60% RH defaults:', err);
-    return DEFAULT_WEATHER;
+    console.warn('Server weather request failed, asking Open-Meteo directly:', err);
   }
+
+  // Fallback: ask Open-Meteo straight from the browser (uses the visitor's own connection,
+  // so it isn't affected by rate limits on the hosting server's shared IP)
+  if (!startDate) {
+    try {
+      const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,soil_moisture_0_to_1cm`);
+      const c = r.ok ? (await r.json()).current : null;
+      if (c && typeof c.temperature_2m === 'number') {
+        return {
+          temperature_celsius: c.temperature_2m,
+          temperature_kelvin: c.temperature_2m + 273.15,
+          humidity_percent: c.relative_humidity_2m,
+          moisture_content: c.relative_humidity_2m,
+          soil_moisture: c.soil_moisture_0_to_1cm ?? null,
+          location_name: locationName,
+          source: 'open-meteo (browser)',
+        };
+      }
+    } catch (err) {
+      console.warn('Direct Open-Meteo request failed:', err);
+    }
+  }
+
+  // Weather is optional: fall back to standard room conditions so the scan still works
+  console.warn('Weather unavailable, using 20°C / 60% RH defaults');
+  return { ...DEFAULT_WEATHER, location_name: locationName };
 }
