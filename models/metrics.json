@@ -1,30 +1,34 @@
 {
-  "test_type_accuracy": 0.9942,
+  "test_type_accuracy": 0.9932,
   "test_freshness_accuracy": 0.9929,
   "per_class_type_accuracy": {
-    "apple": 0.9933,
+    "apple": 0.9955,
     "avocado": 1.0,
-    "banana": 1.0,
-    "bell_pepper": 0.9728,
+    "banana": 0.9978,
+    "bell_pepper": 0.966,
     "carrot": 0.9787,
-    "cucumber": 0.9863,
+    "cucumber": 0.9795,
     "lemon": 1.0,
     "lime": 1.0,
-    "mango": 0.9863,
-    "orange": 0.9978,
+    "mango": 0.9932,
+    "not_produce": 0.9977,
+    "orange": 0.9933,
     "papaya": 1.0,
-    "potato": 0.9932,
+    "potato": 0.9795,
     "strawberry": 1.0,
     "tomato": 1.0
   },
   "epochs": 8,
-  "train_images": 22156,
-  "val_images": 2769,
-  "test_images": 2782,
+  "train_images": 25596,
+  "val_images": 3199,
+  "test_images": 3212,
   "datasets": {
     "muhriddinmuxiddinov/fruits-and-vegetables-dataset": 12000,
     "sriramr/fruits-fresh-and-rotten-for-classification": 9000,
-    "moltean/fruits": 6707
+    "moltean/fruits": 6707,
+    "prasunroy/natural-images": 2800,
+    "jessicali9530/lfw-dataset": 1500
   },
-  "trained_at": "2026-10-06 13:34"
+  "feedback_samples": 0,
+  "trained_at": "2026-10-07 07:14"
 }

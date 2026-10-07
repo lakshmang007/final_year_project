@@ -21,6 +21,9 @@ export interface PredictionResult {
   alternative_candidates?: AlternativeCandidate[]; // Other fruits/veggies it might be
   model?: string; // Which model produced the prediction
   freshness_reliable?: boolean; // False if the model had no fresh/rotten training data for this type
+  is_produce?: boolean; // False when the photo is not a fruit/vegetable (e.g. a person)
+  source?: 'model' | 'feedback'; // 'feedback' = recognised from an earlier user correction
+  matched_feedback?: { label: string; similarity: number } | null;
 }
 
 // Structure for current temperature and moisture readings
@@ -70,6 +73,26 @@ export async function predictProduce(imageBase64: string): Promise<PredictionRes
 }
 
 /**
+ * sendFeedback
+ *
+ * Answers "Is this correct?" for a scan. When `correct` is false, `label` is what the item
+ * really is (any name). The server remembers it so similar photos are recognised next time.
+ */
+export async function sendFeedback(image: string, predicted: string, correct: boolean, label: string | undefined, isProduce: boolean): Promise<{ label: string; stats: { total: number } }> {
+  const response = await fetch('/api/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image, predicted, correct, label, is_produce: isProduce }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `Saving feedback failed (HTTP ${response.status})`);
+  return body;
+}
+
+// Standard room conditions, used when the location or the weather service is unavailable
+export const DEFAULT_WEATHER: WeatherData = { temperature_celsius: 20, temperature_kelvin: 293.15, humidity_percent: 60, source: 'default' };
+
+/**
  * fetchWeather
  * 
  * Calls our local Express backend endpoint (/api/weather)
@@ -88,6 +111,6 @@ export async function fetchWeather(lat: number, lon: number, startDate?: string,
   } catch (err) {
     // Weather is optional: fall back to standard room conditions so the scan still works
     console.warn('Weather fetch failed, using 20°C / 60% RH defaults:', err);
-    return { temperature_celsius: 20, temperature_kelvin: 293.15, humidity_percent: 60, source: 'default' };
+    return DEFAULT_WEATHER;
   }
 }

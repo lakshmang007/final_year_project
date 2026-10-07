@@ -9,3 +9,5 @@ coverage/
 ml/.venv/
 models/best.pt
 __pycache__/
+# User feedback images collected by the app
+data/

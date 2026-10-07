@@ -9,6 +9,7 @@
     "lemon",
     "lime",
     "mango",
+    "not_produce",
     "orange",
     "papaya",
     "potato",
@@ -17,11 +18,12 @@
   ],
   "input_size": 224,
   "input": "RGB float32 NCHW in [0,1]",
-  "architecture": "EfficientNet-B0 (ImageNet pretrained) + type head + freshness head",
   "freshness_untrained_classes": [
     "avocado",
     "lemon",
     "lime",
     "papaya"
-  ]
+  ],
+  "reject_class": "not_produce",
+  "architecture": "EfficientNet-B0 (ImageNet pretrained) + type head + freshness head"
 }

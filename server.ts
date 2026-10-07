@@ -7,13 +7,15 @@
  * 2. Fetch live weather & moisture telemetry for the user's location via Open-Meteo.
  * 3. Reverse-geocode coordinates into readable city names using OpenStreetMap Nominatim.
  * 4. Run our own Kaggle-trained produce freshness model (/api/predict).
+ * 5. Save user feedback so similar photos are recognised next time (/api/feedback).
  */
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import dotenv from "dotenv";
-import { predictImage, modelAvailable } from "./src/server/produceModel";
+import { predictImage, modelAvailable, recordFeedback } from "./src/server/produceModel";
+import { feedbackStats } from "./src/server/feedbackStore";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -43,6 +45,10 @@ app.get("/api/weather", async (req, res) => {
 
     if (!lat || !lon) {
       return res.status(400).json({ error: "Missing latitude or longitude parameters" });
+    }
+    const latNum = Number(lat), lonNum = Number(lon);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lonNum) || Math.abs(latNum) > 90 || Math.abs(lonNum) > 180) {
+      return res.status(400).json({ error: "Latitude must be -90..90 and longitude -180..180" });
     }
 
     // 1. Check if historical archive query is requested
@@ -122,6 +128,37 @@ app.post("/api/predict", async (req, res) => {
 });
 
 /**
+ * POST /api/feedback
+ *
+ * Body: { image, predicted, correct: boolean, label?, is_produce? }
+ * Saves the user's answer to "Is this correct?". If not correct, `label` is what the item
+ * really is (any text). Similar photos are then recognised with that label, and the images
+ * are used the next time the model is retrained (ml/train.py).
+ */
+app.post("/api/feedback", async (req, res) => {
+  try {
+    const { image, predicted, correct, label, is_produce } = req.body || {};
+    if (!image || typeof image !== "string" || typeof predicted !== "string" || typeof correct !== "boolean") {
+      return res.status(400).json({ error: "Expected { image, predicted, correct, label? }" });
+    }
+    const finalLabel = correct ? predicted : String(label || "").trim();
+    if (!finalLabel) {
+      return res.status(400).json({ error: "Please enter what the item is" });
+    }
+    // is_produce: whether the label is a fruit/vegetable ("human" is not); defaults from the label
+    const labelIsProduce = typeof is_produce === "boolean" ? is_produce : finalLabel !== "not_produce";
+    res.json(await recordFeedback(image, predicted, finalLabel, correct, labelIsProduce));
+  } catch (error: any) {
+    console.error("Feedback error:", error);
+    res.status(500).json({ error: error.message || "Could not save feedback" });
+  }
+});
+
+app.get("/api/feedback/stats", (req, res) => {
+  res.json(feedbackStats());
+});
+
+/**
  * GET /api/model/info
  *
  * Returns the trained model's classes and held-out test metrics (models/metrics.json).
@@ -170,12 +207,27 @@ app.post("/api/ml/benchmark", (req, res) => {
 });
 
 /**
+ * JSON error handler: malformed JSON or a too-large upload returns a JSON error
+ * (instead of Express's default HTML error page) so the app can show the message.
+ */
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!req.path.startsWith("/api/")) return next(err);
+  const status = err.status || err.statusCode || 500;
+  const message = err.type === "entity.too.large"
+    ? "Image is too large (max 10 MB). Please use a smaller photo."
+    : status === 400 ? "Invalid request body" : "Server error";
+  res.status(status).json({ error: message });
+});
+
+/**
  * startServer
  * 
  * Boots up the Express web server and attaches Vite development middleware.
  */
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
+  // `npm start` passes --production (works the same on Windows and Linux hosts like Render)
+  const isProduction = process.env.NODE_ENV === "production" || process.argv.includes("--production");
+  if (!isProduction) {
     // In development: Vite handles live bundling
     const vite = await createViteServer({
       server: { middlewareMode: true },

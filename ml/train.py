@@ -13,6 +13,9 @@ Datasets (downloaded automatically with kagglehub, no Kaggle login needed):
   2. sriramr/fruits-fresh-and-rotten-for-classification   (apple/banana/orange, fresh/rotten)
   3. moltean/fruits (Fruits-360)                          (type labels only, adds
      avocado, lemon, lime, papaya; freshness loss is masked for these images)
+  4. prasunroy/natural-images + jessicali9530/lfw-dataset (people, faces, animals,
+     vehicles, objects) -> the "not_produce" class, so non-produce photos are rejected
+  5. User feedback saved by the app in data/feedback/ (trained classes only)
 
 Usage:
   ml/.venv/Scripts/python ml/train.py            # full training + ONNX export
@@ -62,11 +65,22 @@ TYPE_ONLY_CAP = 1200
 # Fruits-360 folders that contain a keyword but are a different item.
 EXCLUDE = ("pineapple", "mangostan", "sweet", "pepino", "custard", "rose hip")
 
+# Images of anything that is NOT produce (people, faces, animals, vehicles, objects) teach the
+# model to answer "not_produce" instead of forcing every photo into a produce class.
+REJECT_CLASS = "not_produce"
+NEGATIVE_EXCLUDE = ("fruit",)  # natural-images has a "fruit" folder: not a negative
+
 DATASETS = [
     ("muhriddinmuxiddinov/fruits-and-vegetables-dataset", "freshrotten", None),
     ("sriramr/fruits-fresh-and-rotten-for-classification", "freshrotten", 1500),  # cap per (type, fresh) group to keep classes balanced
     ("moltean/fruits", "typeonly", 250),  # cap per type: studio shots, keep them a minority
+    ("prasunroy/natural-images", "negative", (400, None)),  # airplane, car, cat, dog, flower, motorbike, person
+    ("jessicali9530/lfw-dataset", "negative", (20, 1500)),  # human faces (max 20 per person, 1500 total)
 ]
+
+# User feedback saved by the app (POST /api/feedback). Samples whose label is one of the trained
+# classes are added to the training set the next time this script runs.
+FEEDBACK_FILE = ROOT / "data" / "feedback" / "feedback.json"
 
 
 def folder_type(name: str):
@@ -91,6 +105,22 @@ def folder_fresh(name: str):
 def scan_dataset(root: Path, mode: str, cap):
     """Return list of (path, type, fresh) where fresh is 1/0, or -1 when unknown."""
     items = []
+    if mode == "negative":
+        per_group, total = cap
+        seen, groups = set(), defaultdict(list)
+        for p in root.rglob("*"):
+            if p.suffix.lower() not in IMG_EXT or any(e in p.parent.name.lower() for e in NEGATIVE_EXCLUDE):
+                continue
+            key = (p.parent.name.lower(), p.name.lower(), p.stat().st_size)
+            if key not in seen:
+                seen.add(key)
+                groups[p.parent.name.lower()].append(str(p))
+        rng = random.Random(0)
+        for g in sorted(groups):
+            paths = sorted(groups[g]); rng.shuffle(paths)
+            items += [(q, REJECT_CLASS, -1) for q in paths[:per_group]]
+        rng.shuffle(items)
+        return items[:total] if total else items
     if mode == "typeonly":
         # Fruits-360 ships several variants; use only the 100x100 Training/Test sets.
         dirs = [d for d in root.rglob("*") if d.is_dir() and d.name in ("Training", "Test")]
@@ -156,8 +186,11 @@ class ProduceNet(nn.Module):
         self.type_head = nn.Sequential(nn.Dropout(0.3), nn.Linear(1280, n_types))
         self.fresh_head = nn.Sequential(nn.Dropout(0.3), nn.Linear(1280, 1))
 
+    def embed(self, x):
+        return self.pool(self.features(x)).flatten(1)
+
     def forward(self, x):
-        z = self.pool(self.features(x)).flatten(1)
+        z = self.embed(x)
         return self.type_head(z), self.fresh_head(z).squeeze(1)
 
 
@@ -171,8 +204,28 @@ class ExportWrapper(nn.Module):
         self.register_buffer("std", torch.tensor(STD).view(1, 3, 1, 1))
 
     def forward(self, x):
-        t, f = self.net((x - self.mean) / self.std)
-        return torch.softmax(t, dim=1), torch.sigmoid(f)
+        z = self.net.embed((x - self.mean) / self.std)
+        t, f = self.net.type_head(z), self.net.fresh_head(z).squeeze(1)
+        # L2-normalised embedding: the server compares it (cosine similarity) with saved feedback
+        return torch.softmax(t, dim=1), torch.sigmoid(f), nn.functional.normalize(z, dim=1)
+
+
+def load_feedback(classes):
+    """User corrections saved by the app: known produce labels, and non-produce labels -> not_produce."""
+    try:
+        entries = json.loads(FEEDBACK_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    out = []
+    for e in entries:
+        path = FEEDBACK_FILE.parent / e["image"]
+        if not path.exists():
+            continue
+        if e.get("is_produce") is False:
+            out.append((str(path), REJECT_CLASS, -1))  # e.g. a selfie labelled "human"
+        elif e["label"] in classes:
+            out.append((str(path), e["label"], -1))
+    return out
 
 
 def split(items, seed=42):
@@ -232,11 +285,14 @@ def main():
         items += got
 
     classes = sorted({t for _, t, _ in items})
+    feedback = load_feedback(set(classes))
+    print(f"User feedback samples added: {len(feedback)}")
     c2i = {c: i for i, c in enumerate(classes)}
     print("Classes:", classes)
     print("Per class:", dict(Counter(t for _, t, _ in items)))
 
     tr, va, te = split(items)
+    tr += feedback  # feedback is only used for training, never for the reported test metrics
     print(f"train={len(tr)} val={len(va)} test={len(te)}")
 
     train_tfm = transforms.Compose([
@@ -302,21 +358,22 @@ def main():
     dummy = torch.rand(1, 3, IMG_SIZE, IMG_SIZE)
     torch.onnx.export(
         wrapper, dummy, OUT_DIR / "produce_model.onnx",
-        input_names=["image"], output_names=["type_probs", "fresh_prob"],
-        dynamic_axes={"image": {0: "batch"}, "type_probs": {0: "batch"}, "fresh_prob": {0: "batch"}},
+        input_names=["image"], output_names=["type_probs", "fresh_prob", "embedding"],
+        dynamic_axes={"image": {0: "batch"}, "type_probs": {0: "batch"}, "fresh_prob": {0: "batch"}, "embedding": {0: "batch"}},
         opset_version=17, dynamo=False,
     )
     (OUT_DIR / "labels.json").write_text(json.dumps({
         "classes": classes, "input_size": IMG_SIZE, "input": "RGB float32 NCHW in [0,1]",
         # Classes with no fresh/rotten training images: the freshness output is not reliable for them
         "freshness_untrained_classes": sorted(TYPE_ONLY_CLASSES & set(classes)),
+        "reject_class": REJECT_CLASS,
         "architecture": "EfficientNet-B0 (ImageNet pretrained) + type head + freshness head",
     }, indent=2))
     (OUT_DIR / "metrics.json").write_text(json.dumps({
         "test_type_accuracy": round(ta, 4), "test_freshness_accuracy": round(fa, 4),
         "per_class_type_accuracy": per_class, "epochs": args.epochs,
         "train_images": len(tr), "val_images": len(va), "test_images": len(te),
-        "datasets": sources, "trained_at": time.strftime("%Y-%m-%d %H:%M"),
+        "datasets": sources, "feedback_samples": len(feedback), "trained_at": time.strftime("%Y-%m-%d %H:%M"),
     }, indent=2))
     best_path.unlink(missing_ok=True)
     print(f"Saved model to {OUT_DIR}")

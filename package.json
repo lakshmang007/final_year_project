@@ -1,5 +1,5 @@
 {
-  "name": "react-example",
+  "name": "biofresh-cv",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,7 +10,8 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "setup:ml": "python -m venv ml/.venv && ml/.venv/Scripts/python -m pip install -r ml/requirements.txt",
-    "train": "ml/.venv/Scripts/python ml/train.py"
+    "train": "ml/.venv/Scripts/python ml/train.py",
+    "start": "tsx server.ts --production"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
@@ -29,6 +30,7 @@
     "recharts": "^3.8.1",
     "sharp": "^0.35.5",
     "tailwind-merge": "^3.5.0",
+    "tsx": "^4.21.0",
     "vite": "^6.2.3"
   },
   "devDependencies": {
@@ -36,8 +38,10 @@
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

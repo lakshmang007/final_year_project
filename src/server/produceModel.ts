@@ -15,6 +15,7 @@ import fs from "fs";
 import path from "path";
 import * as ort from "onnxruntime-node";
 import sharp from "sharp";
+import { addFeedback, findClosest, feedbackStats, normalizeLabel } from "./feedbackStore";
 
 const MODEL_DIR = path.join(process.cwd(), "models");
 const MODEL_PATH = path.join(MODEL_DIR, "produce_model.onnx");
@@ -24,6 +25,7 @@ interface Labels {
   classes: string[];
   input_size: number;
   freshness_untrained_classes?: string[];
+  reject_class?: string;
 }
 
 let sessionPromise: Promise<{ session: ort.InferenceSession; labels: Labels }> | null = null;
@@ -49,6 +51,12 @@ const toLabel = (id: string) => id.split("_").map(w => w[0].toUpperCase() + w.sl
 
 const PREDICT_TIMEOUT_MS = 30000;
 const ASSUMED_QUALITY = 0.8;
+const REJECT_CLASS = "not_produce";
+// Below this top-class probability the model is unsure, so the photo is treated as not produce
+const MIN_CONFIDENCE = 0.5;
+// Cosine similarity needed to reuse a user's label: always at STRONG, or at WEAK when the model is unsure
+const MEMORY_STRONG_MATCH = 0.9;
+const MEMORY_WEAK_MATCH = 0.8;
 
 /** Runs a prediction, failing (instead of hanging the request) if it takes too long. */
 export async function predictImage(imageBase64: string) {
@@ -66,7 +74,8 @@ export async function predictImage(imageBase64: string) {
   }
 }
 
-async function runPrediction(imageBase64: string) {
+/** Decodes the photo and runs the ONNX model: class probabilities, freshness and embedding. */
+async function infer(imageBase64: string) {
   if (!modelAvailable()) {
     throw new Error("Trained model not found. Run `npm run train` (see README) to create models/produce_model.onnx.");
   }
@@ -94,27 +103,73 @@ async function runPrediction(imageBase64: string) {
   }
 
   const out = await session.run({ image: new ort.Tensor("float32", chw, [1, 3, size, size]) });
-  const probs = Array.from(out.type_probs.data as Float32Array);
-  const freshProb = (out.fresh_prob.data as Float32Array)[0];
+  return {
+    labels,
+    input,
+    probs: Array.from(out.type_probs.data as Float32Array),
+    freshProb: (out.fresh_prob.data as Float32Array)[0],
+    // Older models were exported without an embedding output; feedback matching is then skipped
+    embedding: out.embedding ? (out.embedding.data as Float32Array) : null,
+  };
+}
+
+async function runPrediction(imageBase64: string) {
+  const { labels, probs, freshProb, embedding } = await infer(imageBase64);
+  const reject = labels.reject_class ?? REJECT_CLASS;
 
   const ranked = probs
     .map((p, i) => ({ type: labels.classes[i], p }))
     .sort((a, b) => b.p - a.p);
   const top = ranked[0];
-  const freshnessReliable = !(labels.freshness_untrained_classes ?? []).includes(top.type);
+
+  // 1. Model decision: unsure predictions are treated as "not produce" rather than guessed
+  let type = top.p >= MIN_CONFIDENCE ? top.type : reject;
+  let confidence = top.p;
+  let source: "model" | "feedback" = "model";
+
+  // 2. Feedback memory: a very similar photo that a user already labelled overrides the model
+  const match = embedding ? findClosest(embedding) : null;
+  if (match && match.entry.label !== type) {
+    const strong = match.similarity >= MEMORY_STRONG_MATCH;
+    const weak = match.similarity >= MEMORY_WEAK_MATCH && (type === reject || top.p < 0.7);
+    if (strong || weak) {
+      type = match.entry.label;
+      confidence = match.similarity;
+      source = "feedback";
+    }
+  }
+
+  // A user label like "human" is remembered as not produce
+  const isProduce = source === "feedback" ? match!.entry.is_produce !== false && type !== reject : type !== reject;
+  const knownClass = labels.classes.includes(type);
+  const freshnessReliable = isProduce && knownClass && !(labels.freshness_untrained_classes ?? []).includes(type);
 
   return {
-    produce_type: top.type,
+    produce_type: type,
+    is_produce: isProduce,
     // When the model was never trained on fresh/rotten examples of this type, its freshness
     // output is meaningless, so assume a typical fresh item (0.8) and flag it to the UI.
-    quality_score: freshnessReliable ? Number(freshProb.toFixed(3)) : ASSUMED_QUALITY,
-    confidence_score: Number(top.p.toFixed(3)),
-    alternative_candidates: ranked.slice(1, 4).map(r => ({
-      type: r.type,
-      label: toLabel(r.type),
-      reason: `Model probability ${(r.p * 100).toFixed(1)}%`,
-    })),
+    quality_score: !isProduce ? 0 : freshnessReliable ? Number(freshProb.toFixed(3)) : ASSUMED_QUALITY,
+    confidence_score: Number(confidence.toFixed(3)),
+    alternative_candidates: ranked
+      .filter(r => r.type !== type && r.type !== reject)
+      .slice(0, 3)
+      .map(r => ({ type: r.type, label: toLabel(r.type), reason: `Model probability ${(r.p * 100).toFixed(1)}%` })),
     freshness_reliable: freshnessReliable,
+    source,
+    matched_feedback: match ? { label: match.entry.label, similarity: Number(match.similarity.toFixed(3)) } : null,
     model: "BioFresh EfficientNet-B0 (Kaggle-trained, ONNX)",
   };
+}
+
+/**
+ * Saves user feedback for a photo: "correct" confirms the prediction, otherwise `label` is
+ * what the item really is (any name, e.g. "kiwi" or "not_produce").
+ */
+export async function recordFeedback(imageBase64: string, predicted: string, label: string, correct: boolean, isProduce: boolean) {
+  const { embedding, input } = await infer(imageBase64);
+  if (!embedding) throw new Error("This model version has no embedding output; retrain with `npm run train`.");
+  const jpeg = await sharp(input).rotate().resize(320, 320, { fit: "inside" }).jpeg({ quality: 85 }).toBuffer();
+  const entry = addFeedback({ label: normalizeLabel(label), predicted, correct, isProduce, jpeg, embedding });
+  return { id: entry.id, label: entry.label, stats: feedbackStats() };
 }

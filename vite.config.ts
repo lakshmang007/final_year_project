@@ -21,7 +21,7 @@ export default defineConfig(({mode}) => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Never watch the ML training folder (datasets + Python venv = hundreds of thousands
       // of files) or the model output; watching them freezes the dev server.
-      watch: { ignored: ['**/ml/**', '**/models/**', '**/tmp_test/**'] },
+      watch: { ignored: ['**/ml/**', '**/models/**', '**/data/**', '**/tmp_test/**'] },
     },
   };
 });

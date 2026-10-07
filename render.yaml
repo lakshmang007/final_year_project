@@ -1,0 +1,16 @@
+# Render Blueprint: Render reads this file when you choose New -> Blueprint and pick this repo.
+services:
+  - type: web
+    name: biofresh-cv
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # onnxruntime-node would otherwise download ~400 MB of CUDA GPU libraries on Linux.
+      # Render's free servers have no GPU; the CPU runtime is already bundled in the package.
+      - key: ONNXRUNTIME_NODE_INSTALL
+        value: skip

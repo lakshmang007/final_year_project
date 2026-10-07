@@ -17,14 +17,27 @@ import { Camera, History as HistoryIcon, Leaf, Thermometer, Droplets, Info, Chev
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { auth, loginWithGoogle, checkRedirectLogin, loginAnonymously } from './lib/firebase';
-import { savePrediction, getHistory, updatePrediction, deletePrediction, PredictionHistoryItem } from './services/history';
-import { predictProduce, fetchWeather, PredictionResult, WeatherData } from './services/api';
+import { savePrediction, getHistory, updatePrediction, deletePrediction, PredictionHistoryItem, compressImageThumbnail } from './services/history';
+import { predictProduce, fetchWeather, sendFeedback, DEFAULT_WEATHER, PredictionResult, WeatherData } from './services/api';
 import { calculateDecayRate, calculateRUL, getNutrientRetention, getFreshnessLabel, NutrientDetail } from './lib/science';
 import { getRecommendations, Recipe } from './lib/recipes';
 import { PipelineVisualizer } from './components/PipelineVisualizer';
 import { RAGKnowledgeAdvisor } from './components/RAGKnowledgeAdvisor';
 import { MLArchitectureVisualizer } from './components/MLArchitectureVisualizer';
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, Tooltip, Legend } from 'recharts';
+
+// Words that mean the photo is not a fruit/vegetable when a user types a correction
+const NON_PRODUCE_WORDS = new Set([
+  'human', 'person', 'people', 'man', 'woman', 'men', 'women', 'boy', 'girl', 'child', 'kid', 'baby',
+  'me', 'myself', 'selfie', 'face', 'hand', 'body', 'student', 'friend',
+  'dog', 'cat', 'animal', 'pet', 'bird', 'car', 'bike', 'phone', 'laptop', 'book', 'bottle', 'cup',
+  'table', 'chair', 'room', 'wall', 'object', 'nothing', 'not', 'none',
+]);
+
+/** Guess whether a typed label is produce: "human" or "my face" -> false, "kiwi" -> true. */
+function looksLikeProduce(label: string): boolean {
+  return !label.split('_').some(word => NON_PRODUCE_WORDS.has(word));
+}
 
 /**
  * LocationSelectorModal
@@ -371,6 +384,11 @@ export default function App() {
   const [lastSavedId, setLastSavedId] = useState<string | null>(null); // Firestore doc ID
   const [feedbackState, setFeedbackState] = useState<'none' | 'correct' | 'incorrect'>('none');
   const [showCorrection, setShowCorrection] = useState(false);
+  const [customLabel, setCustomLabel] = useState(''); // free-text answer to "what is it?"
+  const [feedbackSaveState, setFeedbackSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  // False when the model decided the photo is not a fruit/vegetable (e.g. a person)
+  const isProduce = prediction?.is_produce !== false;
   const [alertEnabled, setAlertEnabled] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState<number>(12); // Alert when 12h left
   const [showThresholdPicker, setShowThresholdPicker] = useState(false);
@@ -749,15 +767,18 @@ export default function App() {
    * 4. Look up zero-waste recipes if near expiry
    * 5. Save the scan result to Firestore database
    */
-  const processImageAndPredict = async (imageData: string) => {
+  const processImageAndPredict = async (originalImage: string) => {
     setLoading(true);
     setError(null);
-    setCurrentImage(imageData);
     stopScanner();
+    // Phone photos can be 10+ MB; the model only needs 224x224, so shrink to max 1024px first.
+    // (Falls back to the original if the browser can't decode it.)
+    const imageData = (await compressImageThumbnail(originalImage, 1024, 0.9)) || originalImage;
+    setCurrentImage(imageData);
 
     try {
       // 1. Get Lat/Lon coordinates for ambient weather
-      let lat = 0, lon = 0;
+      let lat: number | null = null, lon: number | null = null;
       const savedLat = localStorage.getItem('biofresh_lat');
       const savedLon = localStorage.getItem('biofresh_lon');
       
@@ -772,14 +793,15 @@ export default function App() {
           lat = pos.coords.latitude;
           lon = pos.coords.longitude;
         } catch (e) {
-          console.warn("Geolocation failed, using default");
+          console.warn("Geolocation unavailable, using standard room conditions");
         }
       }
 
       // 2. Parallel API calls (Predict produce with our trained model + Fetch Weather with Open-Meteo)
       const [predResult, weatherResult] = await Promise.all([
         predictProduce(imageData),
-        fetchWeather(lat, lon)
+        // Without a location, don't query the weather for lat 0 / lon 0 (the middle of the Atlantic)
+        lat !== null && lon !== null ? fetchWeather(lat, lon) : Promise.resolve(DEFAULT_WEATHER)
       ]);
 
       // 3. Arrhenius Engine Logic with Storage Environment adjustment
@@ -800,6 +822,20 @@ export default function App() {
 
       setPrediction(predResult);
       setWeather(effectiveWeather);
+      setFeedbackState('none');
+      setShowCorrection(false);
+      setCustomLabel('');
+      setFeedbackSaveState('idle');
+
+      if (predResult.is_produce === false) {
+        // Not a fruit/vegetable: skip the shelf-life maths and history, just ask for feedback
+        setRul(0);
+        setNutrients(null);
+        setRecipes([]);
+        setLastSavedId(null);
+        setView('result');
+        return;
+      }
 
       // Run Arrhenius kinetics equation: k = A * exp(-Ea / RT)
       const k = calculateDecayRate(predResult.produce_type, effectiveTempK);
@@ -882,6 +918,7 @@ export default function App() {
    */
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = ''; // allow choosing the same file again later
     if (!file) return;
 
     const reader = new FileReader();
@@ -926,6 +963,8 @@ export default function App() {
     setFeedbackState('none');
     setAlertEnabled(false);
     setShowCorrection(false);
+    setCustomLabel('');
+    setFeedbackSaveState('idle');
   };
 
   /**
@@ -939,9 +978,32 @@ export default function App() {
       setShowCorrection(true);
     } else {
       setShowCorrection(false);
+      submitFeedback(true, prediction?.produce_type, isProduce);
       if (lastSavedId) {
         await updatePrediction(lastSavedId, { isCorrect: true }).catch(err => console.warn("Update prediction failed:", err));
       }
+    }
+  };
+
+  /**
+   * submitFeedback
+   *
+   * Sends the answer to "Is this correct?" to the server, which remembers the photo so that
+   * similar photos get the right name next time (and uses it when the model is retrained).
+   */
+  const submitFeedback = async (correct: boolean, label: string | undefined, labelIsProduce: boolean) => {
+    if (!prediction || !currentImage) return;
+    setFeedbackSaveState('saving');
+    try {
+      const result = await sendFeedback(currentImage, prediction.produce_type, correct, label, labelIsProduce);
+      const name = result.label === 'not_produce' ? 'not a fruit or vegetable' : result.label.replace(/_/g, ' ');
+      setFeedbackSaveState('saved');
+      setFeedbackMessage(correct
+        ? 'Thanks! Saved as correct.'
+        : `Thanks! Similar photos will be recognised as "${name}"${labelIsProduce || result.label === 'not_produce' ? '' : ' (not a fruit or vegetable)'} from now on.`);
+    } catch (err: any) {
+      setFeedbackSaveState('error');
+      setFeedbackMessage(err.message || 'Could not save feedback');
     }
   };
 
@@ -951,19 +1013,50 @@ export default function App() {
    * If the AI confused lookalike items (e.g. Avocado vs Mango), the user selects the right one here.
    * We instantly re-run the Arrhenius math, update vitamins & recipes, and update Firestore!
    */
-  const handleCorrection = async (newType: string) => {
+  const handleCorrection = async (rawType: string, labelIsProduce?: boolean) => {
     if (!prediction || !weather) return;
+    // Typed names like "Dragon Fruit" become "dragon_fruit" (same format as the model's classes)
+    const newType = rawType.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!newType) return;
+    // The user chose explicitly (button), otherwise guess from the name ("human" -> not produce)
+    const produce = newType !== 'not_produce' && (labelIsProduce ?? looksLikeProduce(newType));
+
+    // Teach the server what this photo really shows (used for future scans + retraining)
+    submitFeedback(false, newType, produce);
+
+    if (!produce) {
+      // Not food (e.g. "human"): no shelf life, nutrients or recipes
+      setPrediction({ ...prediction, produce_type: newType, is_produce: false, quality_score: 0, confidence_score: 1.0, source: 'model' });
+      setRul(0);
+      setNutrients(null);
+      setRecipes([]);
+      setShowCorrection(false);
+      setFeedbackState('correct');
+      // The scan that was saved to history was not produce, so remove it
+      if (lastSavedId) {
+        deletePrediction(lastSavedId).catch(e => console.warn("Firestore delete error:", e));
+        setLastSavedId(null);
+      }
+      return;
+    }
+
+    // If the model thought it was not produce, it has no freshness reading: assume fresh (0.8)
+    const wasProduce = prediction.is_produce !== false;
+    const quality = wasProduce ? prediction.quality_score : 0.8;
 
     // Recalculate Arrhenius decay and RUL based on newly verified produce type
     const k = calculateDecayRate(newType, weather.temperature_kelvin);
-    const calculatedRul = calculateRUL(prediction.quality_score, k);
-    const calculatedNutrients = getNutrientRetention(newType, prediction.quality_score);
+    const calculatedRul = calculateRUL(quality, k);
+    const calculatedNutrients = getNutrientRetention(newType, quality);
 
     // Update local state immediately
-    setPrediction({ 
-      ...prediction, 
+    setPrediction({
+      ...prediction,
       produce_type: newType,
-      confidence_score: 1.0 
+      is_produce: true,
+      quality_score: quality,
+      freshness_reliable: wasProduce ? prediction.freshness_reliable : false,
+      confidence_score: 1.0
     });
     setRul(calculatedRul);
     setNutrients(calculatedNutrients);
@@ -987,7 +1080,7 @@ export default function App() {
       try {
         const savedId = await savePrediction({
           produceType: newType,
-          qualityScore: prediction.quality_score,
+          qualityScore: quality,
           rulHours: calculatedRul,
           temperatureK: weather.temperature_kelvin,
           humidity: weather.humidity_percent,
@@ -1010,6 +1103,10 @@ export default function App() {
   const toggleAlert = async () => {
     const newState = !alertEnabled;
     setAlertEnabled(newState);
+    // Update the local list too, so the home screen's "Active Freshness Alerts" shows it right away
+    setHistory(prev => prev.map(h => h.id === lastSavedId
+      ? { ...h, alertEnabled: newState, alertThreshold: newState ? alertThreshold : undefined }
+      : h));
     if (lastSavedId) {
       await updatePrediction(lastSavedId, { 
         alertEnabled: newState,
@@ -1025,6 +1122,7 @@ export default function App() {
    */
   const updateAlertThreshold = async (val: number) => {
     setAlertThreshold(val);
+    setHistory(prev => prev.map(h => h.id === lastSavedId && alertEnabled ? { ...h, alertThreshold: val } : h));
     if (lastSavedId && alertEnabled) {
       await updatePrediction(lastSavedId, { alertThreshold: val });
     }
@@ -1435,7 +1533,7 @@ export default function App() {
               {/* Primary Produce Freshness Hero Card */}
               <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-100 flex flex-col items-center text-center relative overflow-hidden">
                 {/* Visual Status Indicator & Quality Score Badge */}
-                <div className="flex items-center justify-between w-full mb-3">
+                {isProduce && <div className="flex items-center justify-between w-full mb-3">
                   <span className={`px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider border ${
                     rul > 48 
                       ? 'bg-emerald-50 text-emerald-700 border-emerald-200/60' 
@@ -1449,13 +1547,18 @@ export default function App() {
                   <span className="text-[11px] font-mono font-bold bg-slate-100 text-slate-600 px-2.5 py-0.5 rounded-full">
                     Score: {(prediction.quality_score * 100).toFixed(0)}%
                   </span>
-                </div>
+                </div>}
 
                 {/* Produce Name & Verification Badge */}
-                <div className="flex items-center justify-center gap-2 mb-1">
-                  <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 tracking-tight capitalize">
-                    {prediction.produce_type.replace('_', ' ')}
+                <div className="flex flex-wrap items-center justify-center gap-2 mb-1">
+                  <h2 className={`text-2xl sm:text-3xl font-extrabold text-slate-800 tracking-tight ${isProduce ? 'capitalize' : ''}`}>
+                    {isProduce ? prediction.produce_type.replace(/_/g, ' ') : 'Not a fruit or vegetable'}
                   </h2>
+                  {!isProduce && prediction.produce_type !== 'not_produce' && (
+                    <span className="text-[11px] bg-slate-100 text-slate-600 border border-slate-200 px-2.5 py-0.5 rounded-full font-bold capitalize">
+                      {prediction.produce_type.replace(/_/g, ' ')}
+                    </span>
+                  )}
                   {feedbackState === 'correct' && (
                     <span className="text-[11px] bg-emerald-50 text-emerald-700 border border-emerald-200/80 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1">
                       ✓ Verified
@@ -1463,6 +1566,24 @@ export default function App() {
                   )}
                 </div>
 
+                {prediction.source === 'feedback' && (
+                  <p className="text-[11px] text-[#0097B2] bg-teal-50 border border-teal-100 rounded-xl px-3 py-1.5 mb-2 max-w-xs">
+                    Recognised from earlier user feedback ({Math.round((prediction.matched_feedback?.similarity || 0) * 100)}% similar photo).
+                  </p>
+                )}
+
+                {!isProduce && (
+                  <div className="flex flex-col items-center gap-3 my-3">
+                    {currentImage && (
+                      <img src={currentImage} alt="Scanned" className="w-36 h-36 object-cover rounded-2xl border border-slate-200" />
+                    )}
+                    <p className="text-xs text-slate-500 max-w-xs">
+                      BioFresh analyses fruits and vegetables only. This photo looks like something else, such as a person or an object, so no shelf life was calculated.
+                    </p>
+                  </div>
+                )}
+
+                {isProduce && <>
                 {prediction.freshness_reliable === false && (
                   <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200/70 rounded-xl px-3 py-1.5 mb-2 max-w-xs">
                     Freshness was not assessed for {prediction.produce_type.replace('_', ' ')} (no fresh/rotten training images for it), so it is assumed fresh. Check it visually.
@@ -1511,34 +1632,56 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+                </>}
 
                 {/* Notification & Verification Actions */}
                 <div className="w-full pt-4 space-y-2.5">
-                  <div className="grid grid-cols-2 gap-2">
-                    <button 
+                  {isProduce && (
+                    <button
                       onClick={toggleAlert}
-                      className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl font-bold text-xs transition-all border ${
-                        alertEnabled 
-                          ? 'bg-[#0097B2] text-white border-[#0097B2] shadow-xs' 
+                      className={`w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl font-bold text-xs transition-all border ${
+                        alertEnabled
+                          ? 'bg-[#0097B2] text-white border-[#0097B2] shadow-xs'
                           : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
                       }`}
                     >
                       <Bell size={14} fill={alertEnabled ? "currentColor" : "none"} />
                       <span>{alertEnabled ? "Alert Set" : "Notify Me"}</span>
                     </button>
-                    <button 
-                      onClick={() => handleFeedback(true)}
-                      disabled={feedbackState !== 'none'}
-                      className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl font-bold text-xs transition-all border ${
-                        feedbackState === 'correct'
-                          ? 'bg-[#1AAB5F] text-white border-[#1AAB5F]'
-                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                      }`}
-                    >
-                      <ThumbsUp size={14} />
-                      <span>{feedbackState === 'correct' ? "Verified" : "Confirm"}</span>
-                    </button>
-                  </div>
+                  )}
+
+                  {/* Feedback question: the answer is saved so similar photos are recognised next time */}
+                  {feedbackState === 'none' && !showCorrection && (
+                    <div className="w-full p-3 bg-slate-50 rounded-2xl border border-slate-100 space-y-2">
+                      <p className="text-xs font-bold text-slate-700">
+                        {isProduce
+                          ? <>Is this <span className="capitalize">{prediction.produce_type.replace(/_/g, ' ')}</span>?</>
+                          : 'Is it correct that this is not a fruit or vegetable?'}
+                      </p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={() => handleFeedback(true)}
+                          className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl font-bold text-xs border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 transition-all"
+                        >
+                          <ThumbsUp size={14} /> Yes, correct
+                        </button>
+                        <button
+                          onClick={() => handleFeedback(false)}
+                          className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl font-bold text-xs border bg-white text-rose-700 border-rose-200 hover:bg-rose-50 transition-all"
+                        >
+                          <ThumbsDown size={14} /> No, it's wrong
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {feedbackSaveState !== 'idle' && (
+                    <p className={`text-[11px] font-semibold ${
+                      feedbackSaveState === 'error' ? 'text-rose-600' : feedbackSaveState === 'saving' ? 'text-slate-400' : 'text-emerald-700'
+                    }`}>
+                      {feedbackSaveState === 'saving' ? 'Saving feedback…' : feedbackMessage}
+                    </p>
+                  )}
 
                   {alertEnabled && (
                     <div className="p-3 bg-teal-50/60 border border-teal-100 rounded-2xl space-y-2 text-left">
@@ -1558,21 +1701,12 @@ export default function App() {
                     </div>
                   )}
 
-                  {feedbackState === 'none' && !showCorrection && (
-                    <button 
-                      onClick={() => setShowCorrection(true)}
-                      className="text-[11px] font-bold text-slate-400 hover:text-slate-600 transition-colors flex items-center justify-center gap-1 mx-auto pt-1"
-                    >
-                      <span>Incorrect item? Tap to change</span>
-                    </button>
-                  )}
-
                   {/* Clean Correction Picker */}
                   {showCorrection && (
                     <div className="w-full pt-2 space-y-2 text-left bg-slate-50 p-3 rounded-2xl border border-slate-100">
                       <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                        <span>Select correct produce</span>
-                        <button onClick={() => setShowCorrection(false)} className="text-slate-400 hover:text-slate-600">Close</button>
+                        <span>What is it? Pick one or type the name</span>
+                        <button onClick={() => { setShowCorrection(false); setFeedbackState('none'); }} className="text-slate-400 hover:text-slate-600">Close</button>
                       </div>
                       <div className="flex flex-wrap gap-1">
                         {[
@@ -1590,8 +1724,9 @@ export default function App() {
                           { type: 'strawberry', label: '🍓 Strawberry' },
                           { type: 'bell_pepper', label: '🫑 Bell Pepper' },
                           { type: 'carrot', label: '🥕 Carrot' },
-                          { type: 'potato', label: '🥔 Potato' }
-                        ].map(item => (
+                          { type: 'potato', label: '🥔 Potato' },
+                          { type: 'not_produce', label: '🚫 Not a fruit/vegetable' }
+                        ].filter(item => item.type !== prediction.produce_type).map(item => (
                           <button
                             key={item.type}
                             onClick={() => {
@@ -1604,11 +1739,47 @@ export default function App() {
                           </button>
                         ))}
                       </div>
+                      <form
+                        className="space-y-2 pt-1"
+                        onSubmit={(e) => {
+                          // Enter key: guess from the name ("human" -> not produce)
+                          e.preventDefault();
+                          if (customLabel.trim()) handleCorrection(customLabel);
+                        }}
+                      >
+                        <input
+                          type="text"
+                          value={customLabel}
+                          onChange={(e) => setCustomLabel(e.target.value)}
+                          placeholder="Or type the name, e.g. kiwi or human"
+                          maxLength={40}
+                          className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 focus:outline-none focus:border-[#0097B2]"
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            disabled={!customLabel.trim()}
+                            onClick={() => handleCorrection(customLabel, true)}
+                            className="px-2 py-2 rounded-lg bg-[#1AAB5F] text-white text-[11px] font-bold disabled:opacity-40"
+                          >
+                            Save: it's a fruit/vegetable
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!customLabel.trim()}
+                            onClick={() => handleCorrection(customLabel, false)}
+                            className="px-2 py-2 rounded-lg bg-slate-700 text-white text-[11px] font-bold disabled:opacity-40"
+                          >
+                            Save: not a fruit/vegetable
+                          </button>
+                        </div>
+                      </form>
                     </div>
                   )}
                 </div>
               </div>
 
+              {isProduce && <>
               {/* Segmented Navigation Tabs to Keep UI Clean & Organized */}
               <div className="grid grid-cols-4 gap-1.5 p-1 bg-slate-100/80 rounded-2xl border border-slate-200/60">
                 {[
@@ -1728,6 +1899,7 @@ export default function App() {
                   rulHours={rul}
                 />
               )}
+              </>}
 
               {/* Global Discard / New Scan Button */}
               <button 
