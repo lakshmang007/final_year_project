@@ -35,27 +35,23 @@ googleProvider.setCustomParameters({
 
 /**
  * loginWithGoogle
- * 
- * Attempts popup login first, and falls back to redirect for mobile browsers if popup fails or is blocked.
+ *
+ * Uses the popup on every device (phones included). The redirect flow is only a last resort:
+ * when the site is not hosted on the Firebase authDomain (e.g. on onrender.com), modern mobile
+ * browsers block the cross-site storage it needs, so users come back without being logged in.
  */
 export const loginWithGoogle = async () => {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error: any) {
-    // If on mobile or popup blocked, try redirect flow
-    if (
-      error?.code === 'auth/popup-blocked' || 
-      error?.code === 'auth/popup-closed-by-user' ||
-      /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent)
-    ) {
-      if (error?.code !== 'auth/popup-closed-by-user') {
-        console.log("Switching to signInWithRedirect for mobile/popup restriction...");
-        await signInWithRedirect(auth, googleProvider);
-        return null;
-      }
+    // Only switch to redirect when the browser cannot open popups at all (e.g. in-app browsers)
+    if (error?.code === 'auth/popup-blocked' || error?.code === 'auth/operation-not-supported-in-this-environment') {
+      console.log("Popup unavailable, switching to signInWithRedirect...");
+      await signInWithRedirect(auth, googleProvider);
+      return null;
     }
-    console.error("Google Login failed:", error);
+    console.error("Google Login failed:", error?.code || error);
     throw error;
   }
 };
