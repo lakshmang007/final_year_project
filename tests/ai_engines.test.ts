@@ -196,3 +196,22 @@ test("withDeadline rejects slow work", async () => {
   await assert.rejects(withDeadline(new Promise(r => setTimeout(r, 200)), 20), /timed out/);
   assert.equal(await withDeadline(Promise.resolve(7), 1000), 7);
 });
+
+test("minimal thinking is requested; a model that rejects it is retried without", async () => {
+  const configs: any[] = [];
+  const fakeAi: any = { models: { generateContent: async ({ model, config }: any) => {
+    configs.push({ model, thinking: config.thinkingConfig?.thinkingLevel ?? null });
+    if (model === "gemini-2.0-flash" && config.thinkingConfig) throw Object.assign(new Error("400 INVALID_ARGUMENT: thinking level is not supported for this model"), { status: 400 });
+    return { text: '{"ok":true}' };
+  } } };
+  await geminiChatModel(fakeAi, ["gemini-3.8-flash"]).json({ system: "", prompt: "x", schema: {} });
+  const old = geminiChatModel(fakeAi, ["gemini-2.0-flash"]);
+  await old.json({ system: "", prompt: "x", schema: {} });
+  await old.json({ system: "", prompt: "x", schema: {} });
+  assert.deepEqual(configs, [
+    { model: "gemini-3.8-flash", thinking: "MINIMAL" },
+    { model: "gemini-2.0-flash", thinking: "MINIMAL" },
+    { model: "gemini-2.0-flash", thinking: null },
+    { model: "gemini-2.0-flash", thinking: null },
+  ]);
+});

@@ -13,7 +13,7 @@
  * Everything else in ai_engines talks to the `ChatModel` interface below, not to Gemini
  * directly, so the agent can also be tested with a scripted fake model (no key needed).
  */
-import { GoogleGenAI, type Content, type FunctionDeclaration } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, type Content, type FunctionDeclaration } from "@google/genai";
 
 export interface ToolCall {
   name: string;
@@ -35,6 +35,7 @@ export interface ChatModel {
 
 let modelPromise: Promise<ChatModel | null> | null = null;
 let lastError = "";
+let lastCandidates: string[] = [];
 
 /**
  * Text models this key can call, best first: stable "gemini-<version>-flash" models newest first
@@ -62,6 +63,12 @@ export function isModelBusy(e: any): boolean {
     /\b503\b|UNAVAILABLE|high demand|overloaded|timed? ?out|deadline|aborted/i.test(msg);
 }
 
+/** True when a model rejects the thinking setting (older models have no thinking levels). */
+export function isThinkingUnsupported(e: any): boolean {
+  const msg = String(e?.message ?? e ?? "");
+  return (e?.status === 400 || /\b400\b|INVALID_ARGUMENT/.test(msg)) && /think/i.test(msg);
+}
+
 // Each Gemini request gives up after 20 s with at most one retry (the SDK's default is 5 attempts
 // with up to 60 s between them, which made a busy model look frozen for minutes).
 export const REQUEST_TIMEOUT_MS = 20_000;
@@ -81,11 +88,21 @@ async function listModels(ai: GoogleGenAI): Promise<string[]> {
  */
 export function geminiChatModel(ai: Pick<GoogleGenAI, "models">, candidates: string[]): ChatModel {
   let i = 0; // best model that still exists; retired models are skipped for good
-  const call = async <R,>(fn: (model: string) => Promise<R>): Promise<R> => {
+  // Newer models "think" before answering, which made each call take ~30 s. Ask for minimal
+  // thinking (fast answers); models that don't support thinking levels are retried without it.
+  const plain = new Set<string>();
+  const thinking = (model: string) => (plain.has(model) ? {} : { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } });
+  const call = async <R,>(fn: (model: string, extra: object) => Promise<R>): Promise<R> => {
     // A busy model (overloaded / timed out) is skipped for this call only: it is tried first again next time
     for (let j = i; ; j++) {
       try {
-        return await fn(candidates[j]);
+        try {
+          return await fn(candidates[j], thinking(candidates[j]));
+        } catch (e) {
+          if (!isThinkingUnsupported(e) || plain.has(candidates[j])) throw e;
+          plain.add(candidates[j]);
+          return await fn(candidates[j], {});
+        }
       } catch (e) {
         const gone = isModelUnavailable(e), busy = isModelBusy(e);
         if ((!gone && !busy) || j >= candidates.length - 1) throw e;
@@ -97,10 +114,11 @@ export function geminiChatModel(ai: Pick<GoogleGenAI, "models">, candidates: str
   return {
     get name() { return candidates[i]; },
     async chat({ system, history, tools }) {
-      const res = await call(model => ai.models.generateContent({
+      const res = await call((model, extra) => ai.models.generateContent({
         model,
         contents: history,
         config: {
+          ...extra,
           systemInstruction: system,
           temperature: 0.4,
           ...(tools?.length ? { tools: [{ functionDeclarations: tools }] } : {}),
@@ -114,10 +132,10 @@ export function geminiChatModel(ai: Pick<GoogleGenAI, "models">, candidates: str
       };
     },
     async json<T>({ system, prompt, schema }: { system: string; prompt: string; schema: object }) {
-      const res = await call(model => ai.models.generateContent({
+      const res = await call((model, extra) => ai.models.generateContent({
         model,
         contents: prompt,
-        config: { systemInstruction: system, temperature: 0.7, responseMimeType: "application/json", responseJsonSchema: schema },
+        config: { ...extra, systemInstruction: system, temperature: 0.7, responseMimeType: "application/json", responseJsonSchema: schema },
       }));
       return JSON.parse(res.text ?? "{}") as T;
     },
@@ -140,6 +158,7 @@ export function getChatModel(): Promise<ChatModel | null> {
         const ranked = rankModels(await listModels(ai));
         const candidates = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL, ...ranked.filter(n => n !== process.env.GEMINI_MODEL)] : ranked;
         if (!candidates.length) throw new Error("No Gemini text model available for this API key");
+        lastCandidates = candidates;
         lastError = "";
         return geminiChatModel(ai, candidates);
       } catch (e: any) {
@@ -161,5 +180,6 @@ export function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
 
 export async function llmStatus() {
   const model = await getChatModel();
-  return { available: !!model, provider: "Google Gemini", model: model?.name ?? null, reason: model ? null : lastError };
+  // Model names only (never the key): which models this key can use, in the order they are tried
+  return { available: !!model, provider: "Google Gemini", model: model?.name ?? null, reason: model ? null : lastError, candidates: lastCandidates.slice(0, 8) };
 }
