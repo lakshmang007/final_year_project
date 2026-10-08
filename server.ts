@@ -8,6 +8,7 @@
  * 3. Reverse-geocode coordinates into readable city names using OpenStreetMap Nominatim.
  * 4. Run our own Kaggle-trained produce freshness model (/api/predict).
  * 5. Save user feedback so similar photos are recognised next time (/api/feedback).
+ * 6. Generative AI rescue plans and the agentic Kitchen Rescue Agent (/api/genai, /api/agent).
  */
 import express from "express";
 import { createServer as createViteServer } from "vite";
@@ -16,11 +17,15 @@ import fs from "fs";
 import dotenv from "dotenv";
 import { predictImage, modelAvailable, recordFeedback } from "./src/server/produceModel";
 import { feedbackStats } from "./src/server/feedbackStore";
+import { generateRescuePlan, runKitchenAgent, llmStatus } from "./src/ai_engines";
+import type { InventoryItem } from "./src/ai_engines/tools";
 
 // Load environment variables from .env file
 dotenv.config();
 
 const app = express();
+// Behind Render's proxy: use the visitor's real IP (X-Forwarded-For) for rate limiting
+app.set("trust proxy", 1);
 const PORT = Number(process.env.PORT) || 3000;
 
 // Allow accepting large image payloads (up to 10 megabytes)
@@ -188,38 +193,81 @@ app.get("/api/model/info", (req, res) => {
 });
 
 /**
- * POST /api/ml/benchmark
- * 
- * Returns full multi-stage PyTorch, CUDA, BF16, YOLO, LLaVA-LoRA, XGBoost & FAISS
- * inference metrics for a given produce scan.
+ * Simple per-IP rate limit for the AI endpoints (each call uses Gemini quota).
  */
-app.post("/api/ml/benchmark", (req, res) => {
-  try {
-    const { produce_type = "banana", quality_score = 0.85, temp_k = 293.15, humidity = 60 } = req.body;
-    
-    const blemishPct = Math.max(0.5, Number(((1 - quality_score) * 35).toFixed(1)));
-    const tempCelsius = temp_k - 273.15;
-    const baseShelfDays = 7.0 * quality_score;
-    const tempPenalty = Math.max(0.1, 1.0 - Math.max(0, (tempCelsius - 10) * 0.04));
-    const humidityModifier = humidity > 85 ? 0.85 : humidity < 40 ? 0.90 : 1.0;
-    const xgbPredictedHours = Math.max(1, Number((baseShelfDays * 24 * tempPenalty * humidityModifier).toFixed(1)));
+const aiHits = new Map<string, number[]>();
+function aiRateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const key = req.ip || "unknown";
+  const now = Date.now();
+  const recent = (aiHits.get(key) || []).filter(t => now - t < 60_000);
+  if (recent.length >= 10) {
+    return res.status(429).json({ error: "Too many AI requests. Please wait a minute and try again." });
+  }
+  recent.push(now);
+  aiHits.set(key, recent);
+  next();
+}
 
-    res.json({
-      status: "success",
-      pipeline: "PyTorch + CUDA + BF16 + YOLOv11 + LLaVA-LoRA + XGBoost + FAISS",
-      telemetry: {
-        yolo_blemish_percent: blemishPct,
-        convnext_spatial_tokens: 1024,
-        llava_visual_tokens: 576,
-        lora_trainable_pct: 0.28,
-        xgboost_predicted_rul_hours: xgbPredictedHours,
-        cuda_total_latency_ms: 55.2,
-        cuda_vram_mb: 5220,
-        faiss_indexed_docs: 14
-      }
-    });
+/**
+ * GET /api/ai/status - whether Gemini is configured (otherwise the AI features run in offline mode)
+ */
+app.get("/api/ai/status", async (req, res) => {
+  res.json(await llmStatus());
+});
+
+/**
+ * POST /api/genai/rescue-plan
+ * Body: { produce_type, quality_score, rul_hours, temperature_c?, humidity_percent?, storage?, freshness_reliable? }
+ * Generative AI: Gemini writes recipes + storage + zero-waste tips grounded in the knowledge base (RAG).
+ */
+app.post("/api/genai/rescue-plan", aiRateLimit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (typeof b.produce_type !== "string" || typeof b.quality_score !== "number" || typeof b.rul_hours !== "number") {
+      return res.status(400).json({ error: "Expected { produce_type, quality_score, rul_hours }" });
+    }
+    res.json(await generateRescuePlan({
+      produce_type: b.produce_type.slice(0, 40),
+      quality_score: Math.min(1, Math.max(0, b.quality_score)),
+      rul_hours: Math.max(0, b.rul_hours),
+      temperature_c: typeof b.temperature_c === "number" ? b.temperature_c : undefined,
+      humidity_percent: typeof b.humidity_percent === "number" ? b.humidity_percent : undefined,
+      storage: typeof b.storage === "string" ? b.storage.slice(0, 20) : undefined,
+      freshness_reliable: b.freshness_reliable !== false,
+    }));
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("GenAI error:", error);
+    res.status(502).json({ error: "The AI could not generate a plan right now: " + (error.message || "unknown error").slice(0, 160) });
+  }
+});
+
+/**
+ * POST /api/agent/run
+ * Body: { goal, inventory: [{ id, produceType, qualityScore, rulHours, timestamp, alertEnabled }], weather? }
+ * Agentic AI: the Kitchen Rescue Agent calls tools in a loop and returns its answer, every step, and actions.
+ */
+app.post("/api/agent/run", aiRateLimit, async (req, res) => {
+  try {
+    const { goal, inventory, weather } = req.body || {};
+    if (typeof goal !== "string" || !goal.trim() || !Array.isArray(inventory)) {
+      return res.status(400).json({ error: "Expected { goal, inventory[] }" });
+    }
+    const items: InventoryItem[] = inventory.slice(0, 50)
+      .filter((i: any) => i && typeof i.id === "string" && typeof i.produceType === "string" && typeof i.rulHours === "number")
+      .map((i: any) => ({
+        id: i.id.slice(0, 64), produceType: i.produceType.slice(0, 40),
+        qualityScore: Math.min(1, Math.max(0, Number(i.qualityScore) || 0)), rulHours: Math.max(0, i.rulHours),
+        timestamp: String(i.timestamp || new Date().toISOString()), alertEnabled: !!i.alertEnabled,
+      }));
+    const w = weather && typeof weather === "object" ? {
+      temperature_celsius: Number(weather.temperature_celsius) || undefined,
+      humidity_percent: Number(weather.humidity_percent) || undefined,
+      location_name: typeof weather.location_name === "string" ? weather.location_name.slice(0, 60) : undefined,
+    } : null;
+    res.json(await runKitchenAgent(goal.trim().slice(0, 500), { inventory: items, weather: w, actions: [] }));
+  } catch (error: any) {
+    console.error("Agent error:", error);
+    res.status(502).json({ error: "The agent could not finish right now: " + (error.message || "unknown error").slice(0, 160) });
   }
 });
 

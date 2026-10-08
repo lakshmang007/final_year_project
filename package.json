@@ -11,9 +11,11 @@
     "lint": "tsc --noEmit",
     "setup:ml": "python -m venv ml/.venv && ml/.venv/Scripts/python -m pip install -r ml/requirements.txt",
     "train": "ml/.venv/Scripts/python ml/train.py",
-    "start": "tsx server.ts --production"
+    "start": "tsx server.ts --production",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
+    "@google/genai": "^2.27.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vis.gl/react-google-maps": "^1.8.3",
     "@vitejs/plugin-react": "^5.0.4",

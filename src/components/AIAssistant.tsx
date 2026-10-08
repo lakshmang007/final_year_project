@@ -1,0 +1,200 @@
+/**
+ * AI Assistant tab: Generative AI rescue plan + Agentic AI Kitchen Rescue Agent
+ *
+ * In simple words:
+ * - "AI Rescue Plan": Gemini writes recipes and storage tips for the scanned item, based on
+ *   documents retrieved from the BioFresh knowledge base (RAG). The sources are shown below it.
+ * - "Kitchen Rescue Agent": you give the agent a goal; it decides which tools to use (your scanned
+ *   items, the shelf-life engine, the knowledge base, weather, reminders) and shows every step.
+ * Both run on the server (src/ai_engines); without a Gemini key they run in a labelled offline mode.
+ */
+import React, { useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import { Bot, ChefHat, Loader2, Sparkles, Wrench, Bell, BookOpen, CheckCircle2, AlertTriangle } from 'lucide-react';
+import {
+  getAIStatus, generateRescuePlan, runKitchenAgent,
+  AIStatus, RescuePlanResult, AgentRunResult,
+} from '../services/api';
+import type { PredictionHistoryItem } from '../services/history';
+
+interface Props {
+  produceType: string;
+  qualityScore: number;
+  rulHours: number;
+  freshnessReliable?: boolean;
+  temperatureC?: number;
+  humidityPercent?: number;
+  locationName?: string;
+  storage?: string;
+  history: PredictionHistoryItem[];
+  onApplyReminder: (itemId: string, hoursBeforeExpiry: number) => void;
+}
+
+const GOALS = [
+  'What should I cook first to avoid waste?',
+  'Set reminders for anything about to spoil',
+  'Should I move my produce to the fridge?',
+];
+
+const TOOL_LABELS: Record<string, string> = {
+  get_inventory: 'Read your scanned items',
+  estimate_shelf_life: 'Arrhenius shelf-life engine',
+  search_knowledge: 'Searched knowledge base (RAG)',
+  get_weather: 'Checked local weather',
+  schedule_reminder: 'Scheduled a reminder',
+};
+
+const pretty = (s: string) => s.replace(/_/g, ' ');
+
+function summarize(tool: string, args: Record<string, unknown>, result: any): string {
+  switch (tool) {
+    case 'get_inventory': return `${result?.count ?? 0} item(s)` + (result?.items?.[0] ? `, most urgent: ${pretty(result.items[0].produce)} (${result.items[0].hours_left} h)` : '');
+    case 'estimate_shelf_life': return `${pretty(String(args.produce))} in ${args.storage}: ~${result?.shelf_life_hours} h at ${result?.temperature_c}°C`;
+    case 'search_knowledge': return (result?.results || []).map((r: any) => r.title).slice(0, 2).join(' · ') || 'no matches';
+    case 'get_weather': return result?.temperature_celsius != null ? `${result.temperature_celsius}°C, ${result.humidity_percent}%` : 'no location';
+    case 'schedule_reminder': return result?.ok ? `${pretty(String(result.item))}, ${result.hours_before_expiry} h before expiry` : String(result?.error);
+    default: return '';
+  }
+}
+
+export function AIAssistant(p: Props) {
+  const [status, setStatus] = useState<AIStatus | null>(null);
+  const [plan, setPlan] = useState<RescuePlanResult | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState('');
+  const [goal, setGoal] = useState(GOALS[0]);
+  const [agent, setAgent] = useState<AgentRunResult | null>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentError, setAgentError] = useState('');
+
+  useEffect(() => { getAIStatus().then(setStatus).catch(() => setStatus(null)); }, []);
+  useEffect(() => { setPlan(null); setAgent(null); }, [p.produceType]);
+
+  const makePlan = async () => {
+    setPlanLoading(true); setPlanError('');
+    try {
+      setPlan(await generateRescuePlan({
+        produce_type: p.produceType, quality_score: p.qualityScore, rul_hours: p.rulHours,
+        temperature_c: p.temperatureC, humidity_percent: p.humidityPercent, storage: p.storage,
+        freshness_reliable: p.freshnessReliable,
+      }));
+    } catch (e: any) { setPlanError(e.message); } finally { setPlanLoading(false); }
+  };
+
+  const runAgent = async (g = goal) => {
+    setAgentLoading(true); setAgentError(''); setGoal(g);
+    try {
+      const inventory = p.history.filter(h => h.id).map(h => ({
+        id: h.id!, produceType: h.correctedType || h.produceType, qualityScore: h.qualityScore, rulHours: h.rulHours,
+        timestamp: (h.timestamp instanceof Date ? h.timestamp : new Date(h.timestamp)).toISOString(), alertEnabled: h.alertEnabled,
+      }));
+      const r = await runKitchenAgent(g, inventory, { temperature_celsius: p.temperatureC, humidity_percent: p.humidityPercent, location_name: p.locationName });
+      setAgent(r);
+      r.actions.forEach(a => p.onApplyReminder(a.item_id, a.hours_before_expiry));
+    } catch (e: any) { setAgentError(e.message); } finally { setAgentLoading(false); }
+  };
+
+  const modeBadge = (mode: 'llm' | 'offline', model: string | null) => (
+    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${mode === 'llm' ? 'bg-violet-50 text-violet-700 border-violet-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+      {mode === 'llm' ? `Generated by ${model}` : 'Offline mode (no LLM)'}
+    </span>
+  );
+
+  return (
+    <div className="space-y-4">
+      {/* Status */}
+      <div className={`rounded-2xl px-4 py-2.5 text-[11px] font-semibold border flex items-center gap-2 ${status?.available ? 'bg-violet-50 border-violet-200 text-violet-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+        <Sparkles size={14} />
+        {status === null ? 'Checking AI status…'
+          : status.available ? <>Generative & agentic AI powered by {status.provider} ({status.model})</>
+          : <>AI model offline ({status.reason}). Features run in offline mode with the same tools and knowledge base.</>}
+      </div>
+
+      {/* Generative AI */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5"><ChefHat size={14} className="text-violet-600" /> AI Rescue Plan <span className="text-slate-400 normal-case font-medium">· Generative AI + RAG</span></h3>
+          {plan && modeBadge(plan.mode, plan.model)}
+        </div>
+        {!plan && (
+          <button onClick={makePlan} disabled={planLoading} className="w-full py-2.5 rounded-xl bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 disabled:opacity-60">
+            {planLoading ? <><Loader2 size={14} className="animate-spin" /> Generating…</> : <><Sparkles size={14} /> Generate a plan for this {pretty(p.produceType)}</>}
+          </button>
+        )}
+        {planError && <p className="text-[11px] text-rose-600">{planError}</p>}
+        {plan && (
+          <div className="space-y-3 text-left">
+            <p className="text-sm font-bold text-slate-800 flex items-start gap-1.5">
+              {plan.plan.safe_to_eat ? <CheckCircle2 size={16} className="text-emerald-600 mt-0.5 shrink-0" /> : <AlertTriangle size={16} className="text-rose-600 mt-0.5 shrink-0" />}
+              {plan.plan.headline}
+            </p>
+            {plan.plan.recipes.map(r => (
+              <div key={r.name} className="p-3 bg-slate-50 rounded-2xl border border-slate-100 space-y-1.5">
+                <div className="flex justify-between items-baseline gap-2">
+                  <h4 className="text-xs font-bold text-slate-800">{r.name}</h4>
+                  {r.minutes > 0 && <span className="text-[10px] font-mono text-slate-400">{r.minutes} min</span>}
+                </div>
+                <p className="text-[11px] text-slate-500">{r.why}</p>
+                {r.ingredients.length > 0 && <div className="flex flex-wrap gap-1">{r.ingredients.map(i => <span key={i} className="text-[10px] bg-white border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-600">{i}</span>)}</div>}
+                <ol className="list-decimal list-inside text-[11px] text-slate-600 space-y-0.5">{r.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
+              </div>
+            ))}
+            {plan.plan.storage_tips.length > 0 && (
+              <ul className="text-[11px] text-slate-600 space-y-1">{plan.plan.storage_tips.map((t, i) => <li key={i}>🧊 {t}</li>)}</ul>
+            )}
+            {plan.plan.waste_tip && <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-100 rounded-xl px-3 py-2">♻️ {plan.plan.waste_tip}</p>}
+            {plan.sources.length > 0 && (
+              <div className="text-[10px] text-slate-400 flex flex-wrap gap-x-2 gap-y-0.5 items-center">
+                <BookOpen size={11} /> Grounded in:
+                {plan.sources.map((s, i) => <span key={s.id}>[S{i + 1}] {s.title}</span>)}
+              </div>
+            )}
+            <button onClick={makePlan} disabled={planLoading} className="text-[11px] font-bold text-violet-700 hover:underline">{planLoading ? 'Generating…' : 'Generate another'}</button>
+          </div>
+        )}
+      </div>
+
+      {/* Agentic AI */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5"><Bot size={14} className="text-[#0097B2]" /> Kitchen Rescue Agent <span className="text-slate-400 normal-case font-medium">· Agentic AI</span></h3>
+          {agent && modeBadge(agent.mode, agent.model)}
+        </div>
+        <p className="text-[11px] text-slate-500">Give the agent a goal. It decides which tools to use across your {p.history.length} scanned item(s) and shows every step.</p>
+        <div className="flex flex-wrap gap-1">
+          {GOALS.map(g => (
+            <button key={g} onClick={() => runAgent(g)} disabled={agentLoading} className="px-2.5 py-1 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-[11px] font-semibold text-slate-700 disabled:opacity-50">{g}</button>
+          ))}
+        </div>
+        <form className="flex gap-2" onSubmit={e => { e.preventDefault(); if (goal.trim()) runAgent(goal); }}>
+          <input value={goal} onChange={e => setGoal(e.target.value)} maxLength={300} placeholder="Or type your own goal…" className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-slate-200 text-xs text-slate-700 focus:outline-none focus:border-[#0097B2]" />
+          <button type="submit" disabled={agentLoading || !goal.trim()} className="px-3 py-2 rounded-lg bg-[#0097B2] text-white text-xs font-bold disabled:opacity-50 flex items-center gap-1">
+            {agentLoading ? <Loader2 size={13} className="animate-spin" /> : <Bot size={13} />} Run
+          </button>
+        </form>
+        {agentError && <p className="text-[11px] text-rose-600">{agentError}</p>}
+        {agentLoading && <p className="text-[11px] text-slate-400 flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> The agent is planning and calling tools…</p>}
+        {agent && !agentLoading && (
+          <div className="space-y-3 text-left">
+            <ol className="relative border-l-2 border-slate-100 ml-2 space-y-2">
+              {agent.steps.map((s, i) => (
+                <li key={i} className="ml-4">
+                  <span className="absolute -left-[9px] mt-0.5 w-4 h-4 rounded-full bg-white border-2 border-[#0097B2] flex items-center justify-center"><Wrench size={8} className="text-[#0097B2]" /></span>
+                  {s.thought && <p className="text-[10px] italic text-slate-400">💭 {s.thought}</p>}
+                  <p className="text-[11px] font-bold text-slate-700">Step {i + 1}: {TOOL_LABELS[s.tool] || s.tool} <code className="font-mono font-normal text-[10px] text-slate-400">{s.tool}</code></p>
+                  <p className="text-[11px] text-slate-500">{summarize(s.tool, s.args, s.result)}</p>
+                </li>
+              ))}
+            </ol>
+            <div className="text-xs text-slate-700 bg-slate-50 border border-slate-100 rounded-2xl px-3 py-2 prose prose-sm max-w-none [&_ul]:list-disc [&_ul]:pl-4 [&_p]:my-1">
+              <ReactMarkdown>{agent.answer}</ReactMarkdown>
+            </div>
+            {agent.actions.length > 0 && (
+              <p className="text-[11px] font-semibold text-[#0097B2] flex items-center gap-1.5"><Bell size={12} /> Reminders turned on: {agent.actions.map(a => `${pretty(a.produce)} (${a.hours_before_expiry} h before)`).join(', ')}</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

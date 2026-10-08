@@ -1,7 +1,7 @@
 /**
  * RAGKnowledgeAdvisor Component
  * 
- * Interactive smart assistant that surfaces vector-retrieved domain intelligence:
+ * Shows knowledge-base documents retrieved for the scanned item (tag + freshness-range matching):
  * 1. Zero-Waste Culinary Recipes
  * 2. Optimal Storage Conditions (Arrhenius & Ethylene control)
  * 3. Micronutrient Conversion & Glycemic Insights
@@ -75,12 +75,12 @@ export function RAGKnowledgeAdvisor({ produceType, qualityScore, rulHours }: RAG
               <h3 className="text-sm font-bold text-slate-800">
                 BioFresh RAG Knowledge Engine
               </h3>
-              <span className="text-[9px] bg-teal-50 text-[#0097B2] px-2 py-0.5 rounded-full font-mono font-bold uppercase tracking-wider border border-teal-100">
-                FAISS Embeddings
+              <span className="text-[10px] bg-teal-50 text-[#0097B2] px-2 py-0.5 rounded-full font-mono font-bold uppercase tracking-wider border border-teal-100">
+                Knowledge base
               </span>
             </div>
             <p className="text-[11px] text-slate-400 font-medium">
-              Verified USDA storage protocols, culinary rescue & composting guides
+              Curated storage tips, rescue recipes & composting guides
             </p>
           </div>
         </div>
@@ -144,7 +144,7 @@ export function RAGKnowledgeAdvisor({ produceType, qualityScore, rulHours }: RAG
                   >
                     <div className="space-y-1.5 flex-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-[9px] font-bold uppercase tracking-wider text-[#0097B2] bg-white px-2 py-0.5 rounded-md border border-[#0097B2]/20 whitespace-nowrap">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-[#0097B2] bg-white px-2 py-0.5 rounded-md border border-[#0097B2]/20 whitespace-nowrap">
                           {doc.category.replace('_', ' ')}
                         </span>
                         <h4 className="text-xs sm:text-sm font-bold text-slate-800 leading-snug">

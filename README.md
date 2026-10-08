@@ -27,25 +27,28 @@ Open-Meteo weather ───►│  src/lib/science.ts: k = A·e^(−Ea/RT),  RU
 
 | | |
 |---|---|
-| Architecture | EfficientNet-B0 (ImageNet pre-trained), two heads: type (14 produce classes + `not_produce`) and fresh vs rotten, plus an image embedding output |
+| Architecture | EfficientNet-B0 (ImageNet pre-trained), two heads: type (34 produce classes + `not_produce`) and fresh vs rotten, plus an image embedding output |
 | Training script | [`ml/train.py`](ml/train.py) |
 | Output | `models/produce_model.onnx`, `models/labels.json`, `models/metrics.json` (held-out test accuracy) |
-| Classes | apple, avocado, banana, bell_pepper, carrot, cucumber, lemon, lime, mango, orange, papaya, potato, strawberry, tomato, **not_produce** |
+| Classes | apple, avocado, banana, beetroot, bell_pepper, cabbage, carrot, cauliflower, chilli_pepper, corn, cucumber, eggplant, garlic, ginger, grapes, kiwi, leafy_greens (lettuce, spinach), lemon, lime, mango, onion, orange, papaya, pear, peas, pineapple, pomegranate, potato, radish, strawberry, sweet_potato, tomato, turnip, watermelon, **not_produce** |
+| Inference | Each photo is analysed as 3 views (whole photo, central 80% crop, mirrored) and the predictions are averaged |
 
 **Datasets** (downloaded automatically, no Kaggle login needed):
 
 1. [Fruits and Vegetables Dataset](https://www.kaggle.com/datasets/muhriddinmuxiddinov/fruits-and-vegetables-dataset): 12,000 images, 10 types, fresh and rotten
 2. [Fruits fresh and rotten for classification](https://www.kaggle.com/datasets/sriramr/fruits-fresh-and-rotten-for-classification): apple, banana and orange, fresh and rotten. The duplicated folders are removed, and each group is capped at 1,500 images for class balance.
-3. [Fruits-360](https://www.kaggle.com/datasets/moltean/fruits): type labels only. It adds avocado, lemon, lime and papaya.
+3. [Fruits-360](https://www.kaggle.com/datasets/moltean/fruits): studio photos, type labels only. It adds avocado, lemon, lime, papaya and studio shots of the other types.
+3b. [Fruit and Vegetable Image Recognition](https://www.kaggle.com/datasets/kritikseth/fruit-and-vegetable-image-recognition): about 3,200 **real-world web photos** of 36 types, with varied backgrounds and lighting. They count 3× in training, and accuracy on its held-out photos is reported separately as `test_real_world_type_accuracy`.
 4. [Natural Images](https://www.kaggle.com/datasets/prasunroy/natural-images) (people, cats, dogs, cars, airplanes, flowers, motorbikes; its fruit folder is excluded) and [LFW faces](https://www.kaggle.com/datasets/jessicali9530/lfw-dataset): the `not_produce` class, so photos of people or objects are rejected instead of being labelled as produce.
 5. User feedback saved by the app in `data/feedback/` (see below).
 
 The data is split 80/10/10 into train, validation and test sets, stratified by (type, freshness).
 Test-set results are stored in `models/metrics.json`, and the app serves them at `GET /api/model/info`.
 
-**Limitation:** avocado, lemon, lime and papaya have no fresh/rotten training images. For these
-types the app identifies the produce, assumes it is fresh (quality 0.8), and tells the user that
-freshness was not assessed. `freshness_reliable: false` is set in the API response.
+**Limitation:** fresh/rotten training images exist only for apple, banana, bell pepper, carrot, cucumber,
+mango, orange, potato, strawberry and tomato. For the other types the app identifies the produce,
+assumes it is fresh (quality 0.8), and tells the user that freshness was not assessed.
+`freshness_reliable: false` is set in the API response (see `freshness_untrained_classes` in `models/labels.json`).
 
 ## Feedback: "Is this correct?"
 
@@ -66,6 +69,36 @@ Each answer is stored by the server in `data/feedback/`: the photo, the label, a
 
 On hosts with temporary disks (for example Render's free plan), `data/feedback/` is wiped on every
 redeploy. To keep feedback permanently there, move it to a database.
+
+## AI components (where to find them)
+
+```
+src/
+├── ai_engines/                 ← all AI logic, runs on the server only
+│   ├── PredictiveAI.ts         Deep-learning vision model (ONNX) + Arrhenius shelf-life prediction
+│   ├── RAGModel.ts             Retrieval over the BioFresh knowledge base (src/lib/ragKnowledge.ts)
+│   ├── GenerativeAI.ts         ★ Generative AI: Gemini writes a rescue plan grounded in retrieved docs (RAG)
+│   ├── AgenticAI.ts            ★ Agentic AI: Kitchen Rescue Agent, a tool-calling loop (max 6 steps)
+│   ├── tools.ts                Tools the agent can call: inventory, shelf life, knowledge base, weather, reminders
+│   └── llm.ts                  Gemini connection; picks the newest stable "flash" model automatically
+├── server/produceModel.ts      Runs the trained model; averages 3 views of each photo
+├── components/AIAssistant.tsx  "✨ AI" tab: rescue plan + agent with its step-by-step trace
+ml/train.py                     Trains the vision model on the Kaggle datasets
+tests/ai_engines.test.ts        Tests for the agent loop and GenAI (scripted model, no key needed)
+```
+
+| Feature | Type | How it works |
+|---|---|---|
+| Produce + freshness recognition | Predictive AI (deep learning) | EfficientNet-B0 trained on Kaggle images, served as ONNX |
+| Shelf life | Physics model | Arrhenius kinetics on the predicted freshness and storage temperature |
+| AI Rescue Plan | **Generative AI + RAG** | Retrieve knowledge-base docs → Gemini generates JSON (recipes, storage tips, zero-waste tip) citing [S1], [S2]. Rotten items never get recipes. |
+| Kitchen Rescue Agent | **Agentic AI** | Gemini receives a goal plus 5 tool definitions, decides which tools to call, the server runs them and returns the results, repeated until it answers. The app shows each step and applies the reminders it schedules. |
+
+**Setup:** create a free key at https://aistudio.google.com/apikey and set `GEMINI_API_KEY`
+in `.env` (local) or in Render → Environment. Check `GET /api/ai/status`. Without a key, both
+features run in a clearly labelled offline mode using the same tools and knowledge base.
+
+Run the tests with `npm test`.
 
 ## Run the app
 
@@ -131,4 +164,7 @@ with any tool you like; `train.py` uses those folders first.
 | `POST /api/feedback` `{ image, predicted, correct, label? }` | Save the answer to "Is this correct?" |
 | `GET /api/feedback/stats` | How much feedback has been collected |
 | `GET /api/model/info` | Model classes and test metrics |
+| `GET /api/ai/status` | Whether Gemini is configured, and which model is used |
+| `POST /api/genai/rescue-plan` | Generative AI rescue plan for a scan (RAG-grounded) |
+| `POST /api/agent/run` `{ goal, inventory[], weather? }` | Run the Kitchen Rescue Agent; returns its answer, steps and actions |
 | `GET /api/weather?lat=&lon=` | Open-Meteo temperature and humidity (the app falls back to 20 °C / 60 % if this is unavailable) |

@@ -14,3 +14,7 @@ services:
       # Render's free servers have no GPU; the CPU runtime is already bundled in the package.
       - key: ONNXRUNTIME_NODE_INSTALL
         value: skip
+      # Gemini key for the Generative AI + Agentic AI features. Not stored in git:
+      # Render asks for the value in the dashboard (Environment tab).
+      - key: GEMINI_API_KEY
+        sync: false

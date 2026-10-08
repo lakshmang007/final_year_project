@@ -22,6 +22,7 @@ export interface PredictionResult {
   model?: string; // Which model produced the prediction
   freshness_reliable?: boolean; // False if the model had no fresh/rotten training data for this type
   is_produce?: boolean; // False when the photo is not a fruit/vegetable (e.g. a person)
+  low_confidence?: boolean; // True when the model's best guess is under 50% sure
   source?: 'model' | 'feedback'; // 'feedback' = recognised from an earlier user correction
   matched_feedback?: { label: string; similarity: number } | null;
 }
@@ -140,4 +141,72 @@ export async function fetchWeather(lat: number, lon: number, startDate?: string,
   // Weather is optional: fall back to standard room conditions so the scan still works
   console.warn('Weather unavailable, using 20°C / 60% RH defaults');
   return { ...DEFAULT_WEATHER, location_name: locationName };
+}
+
+// ---------------------------------------------------------------------------
+// Generative AI + Agentic AI (served by src/ai_engines on the server; the API key never reaches the browser)
+// ---------------------------------------------------------------------------
+
+export interface AIStatus { available: boolean; provider: string; model: string | null; reason: string | null }
+
+export interface RescuePlanResult {
+  mode: 'llm' | 'offline';
+  model: string | null;
+  plan: {
+    headline: string;
+    urgency: 'low' | 'medium' | 'high';
+    safe_to_eat: boolean;
+    recipes: { name: string; why: string; minutes: number; ingredients: string[]; steps: string[] }[];
+    storage_tips: string[];
+    waste_tip: string;
+  };
+  sources: { id: string; title: string; category: string }[];
+}
+
+export interface AgentRunResult {
+  mode: 'llm' | 'offline';
+  model: string | null;
+  answer: string;
+  steps: { tool: string; args: Record<string, unknown>; result: unknown; thought?: string }[];
+  actions: { type: 'set_reminder'; item_id: string; produce: string; hours_before_expiry: number }[];
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Request failed (HTTP ${response.status})`);
+  return data as T;
+}
+
+export async function getAIStatus(): Promise<AIStatus> {
+  const r = await fetch('/api/ai/status');
+  return r.json();
+}
+
+export function generateRescuePlan(facts: {
+  produce_type: string; quality_score: number; rul_hours: number;
+  temperature_c?: number; humidity_percent?: number; storage?: string; freshness_reliable?: boolean;
+}): Promise<RescuePlanResult> {
+  return postJson('/api/genai/rescue-plan', facts);
+}
+
+export function runKitchenAgent(goal: string, inventory: {
+  id: string; produceType: string; qualityScore: number; rulHours: number; timestamp: string; alertEnabled?: boolean;
+}[], weather?: { temperature_celsius?: number; humidity_percent?: number; location_name?: string } | null): Promise<AgentRunResult> {
+  return postJson('/api/agent/run', { goal, inventory, weather });
+}
+
+export interface ModelInfo {
+  available: boolean;
+  labels: { classes: string[]; freshness_untrained_classes?: string[]; model_version?: string } | null;
+  metrics: {
+    test_type_accuracy?: number; test_freshness_accuracy?: number; test_real_world_type_accuracy?: number | null;
+    train_images?: number; datasets?: Record<string, number>; trained_at?: string;
+    independent_eval?: { produce_top1: number; produce_top3: number; not_produce_rejected: number; images: number; produce_images: number; not_produce_images: number; source: string } | null;
+  } | null;
+}
+
+export async function getModelInfo(): Promise<ModelInfo> {
+  const r = await fetch('/api/model/info');
+  return r.json();
 }

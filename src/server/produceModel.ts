@@ -26,6 +26,7 @@ interface Labels {
   input_size: number;
   freshness_untrained_classes?: string[];
   reject_class?: string;
+  model_version?: string;
 }
 
 let sessionPromise: Promise<{ session: ort.InferenceSession; labels: Labels }> | null = null;
@@ -52,8 +53,12 @@ const toLabel = (id: string) => id.split("_").map(w => w[0].toUpperCase() + w.sl
 const PREDICT_TIMEOUT_MS = 30000;
 const ASSUMED_QUALITY = 0.8;
 const REJECT_CLASS = "not_produce";
-// Below this top-class probability the model is unsure, so the photo is treated as not produce
-const MIN_CONFIDENCE = 0.5;
+// Below this top-class probability the photo is treated as not produce. Tuned on an independent set of
+// real-world Wikimedia photos: 0.35 recognised 76.5% of produce while rejecting 93% of non-produce
+// (0.5 rejected too many real, slightly unusual produce photos as "not produce").
+const MIN_CONFIDENCE = 0.35;
+// Between MIN_CONFIDENCE and this, the result is shown as a low-confidence "best guess"
+const SURE_CONFIDENCE = 0.5;
 // Cosine similarity needed to reuse a user's label: always at STRONG, or at WEAK when the model is unsure
 const MEMORY_STRONG_MATCH = 0.9;
 const MEMORY_WEAK_MATCH = 0.8;
@@ -85,31 +90,45 @@ async function infer(imageBase64: string) {
   const base64Data = imageBase64.includes(",") ? imageBase64.split(",")[1] : imageBase64;
   const input = Buffer.from(base64Data, "base64");
 
-  // Decode, auto-rotate (EXIF), resize to model input, raw RGB bytes
-  const { data } = await sharp(input)
-    .rotate()
-    .resize(size, size, { fit: "fill" })
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  // Decode once (auto-rotate from EXIF), then build three views of the photo:
+  //   1. the whole photo  2. the central 80% (zooms in on the item)  3. the whole photo mirrored
+  // Averaging the model's answers over these views ("test-time augmentation") makes it steadier
+  // on real phone photos with clutter around the item.
+  const BASE = Math.round(size / 0.8);
+  const base = await sharp(input).rotate().resize(BASE, BASE, { fit: "fill" }).removeAlpha().raw().toBuffer();
+  const raw = { raw: { width: BASE, height: BASE, channels: 3 as const } };
+  const margin = Math.round((BASE - size) / 2);
+  const views = await Promise.all([
+    sharp(base, raw).resize(size, size, { fit: "fill" }).raw().toBuffer(),
+    sharp(base, raw).extract({ left: margin, top: margin, width: size, height: size }).raw().toBuffer(),
+    sharp(base, raw).resize(size, size, { fit: "fill" }).flop().raw().toBuffer(),
+  ]);
 
   // HWC uint8 -> NCHW float32 in [0,1] (normalisation is baked into the ONNX graph)
   const plane = size * size;
-  const chw = new Float32Array(3 * plane);
-  for (let i = 0; i < plane; i++) {
-    chw[i] = data[i * 3] / 255;
-    chw[plane + i] = data[i * 3 + 1] / 255;
-    chw[2 * plane + i] = data[i * 3 + 2] / 255;
-  }
+  const batch = new Float32Array(views.length * 3 * plane);
+  views.forEach((data, v) => {
+    const o = v * 3 * plane;
+    for (let i = 0; i < plane; i++) {
+      batch[o + i] = data[i * 3] / 255;
+      batch[o + plane + i] = data[i * 3 + 1] / 255;
+      batch[o + 2 * plane + i] = data[i * 3 + 2] / 255;
+    }
+  });
 
-  const out = await session.run({ image: new ort.Tensor("float32", chw, [1, 3, size, size]) });
+  const out = await session.run({ image: new ort.Tensor("float32", batch, [views.length, 3, size, size]) });
+  const n = labels.classes.length;
+  const allProbs = out.type_probs.data as Float32Array;
+  const probs = Array.from({ length: n }, (_, c) => views.reduce((sum, _v, v) => sum + allProbs[v * n + c], 0) / views.length);
+  const fresh = out.fresh_prob.data as Float32Array;
+  const dim = out.embedding ? out.embedding.dims[1] : 0;
   return {
     labels,
     input,
-    probs: Array.from(out.type_probs.data as Float32Array),
-    freshProb: (out.fresh_prob.data as Float32Array)[0],
-    // Older models were exported without an embedding output; feedback matching is then skipped
-    embedding: out.embedding ? (out.embedding.data as Float32Array) : null,
+    probs,
+    freshProb: Array.from(fresh).reduce((a, b) => a + b, 0) / fresh.length,
+    // Embedding of the whole-photo view, used to match feedback. Older models had no embedding output.
+    embedding: out.embedding ? (out.embedding.data as Float32Array).slice(0, dim) : null,
   };
 }
 
@@ -128,7 +147,7 @@ async function runPrediction(imageBase64: string) {
   let source: "model" | "feedback" = "model";
 
   // 2. Feedback memory: a very similar photo that a user already labelled overrides the model
-  const match = embedding ? findClosest(embedding) : null;
+  const match = embedding ? findClosest(embedding, labels.model_version) : null;
   if (match && match.entry.label !== type) {
     const strong = match.similarity >= MEMORY_STRONG_MATCH;
     const weak = match.similarity >= MEMORY_WEAK_MATCH && (type === reject || top.p < 0.7);
@@ -156,6 +175,7 @@ async function runPrediction(imageBase64: string) {
       .slice(0, 3)
       .map(r => ({ type: r.type, label: toLabel(r.type), reason: `Model probability ${(r.p * 100).toFixed(1)}%` })),
     freshness_reliable: freshnessReliable,
+    low_confidence: isProduce && source === "model" && confidence < SURE_CONFIDENCE,
     source,
     matched_feedback: match ? { label: match.entry.label, similarity: Number(match.similarity.toFixed(3)) } : null,
     model: "BioFresh EfficientNet-B0 (Kaggle-trained, ONNX)",
@@ -167,9 +187,9 @@ async function runPrediction(imageBase64: string) {
  * what the item really is (any name, e.g. "kiwi" or "not_produce").
  */
 export async function recordFeedback(imageBase64: string, predicted: string, label: string, correct: boolean, isProduce: boolean) {
-  const { embedding, input } = await infer(imageBase64);
+  const { embedding, input, labels } = await infer(imageBase64);
   if (!embedding) throw new Error("This model version has no embedding output; retrain with `npm run train`.");
   const jpeg = await sharp(input).rotate().resize(320, 320, { fit: "inside" }).jpeg({ quality: 85 }).toBuffer();
-  const entry = addFeedback({ label: normalizeLabel(label), predicted, correct, isProduce, jpeg, embedding });
+  const entry = addFeedback({ label: normalizeLabel(label), predicted, correct, isProduce, jpeg, embedding, modelVersion: labels.model_version });
   return { id: entry.id, label: entry.label, stats: feedbackStats() };
 }

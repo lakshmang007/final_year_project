@@ -18,12 +18,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { auth, loginWithGoogle, checkRedirectLogin, loginAnonymously } from './lib/firebase';
 import { savePrediction, getHistory, updatePrediction, deletePrediction, PredictionHistoryItem, compressImageThumbnail } from './services/history';
-import { predictProduce, fetchWeather, sendFeedback, DEFAULT_WEATHER, PredictionResult, WeatherData } from './services/api';
-import { calculateDecayRate, calculateRUL, getNutrientRetention, getFreshnessLabel, NutrientDetail } from './lib/science';
+import { predictProduce, fetchWeather, sendFeedback, getModelInfo, DEFAULT_WEATHER, PredictionResult, WeatherData } from './services/api';
+import { calculateDecayRate, calculateRUL, getNutrientRetention, getFreshnessLabel, NutrientDetail, PRODUCE_DATA } from './lib/science';
 import { getRecommendations, Recipe } from './lib/recipes';
-import { PipelineVisualizer } from './components/PipelineVisualizer';
 import { RAGKnowledgeAdvisor } from './components/RAGKnowledgeAdvisor';
-import { MLArchitectureVisualizer } from './components/MLArchitectureVisualizer';
+import { HowItWorks } from './components/HowItWorks';
+import { AIAssistant } from './components/AIAssistant';
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, Tooltip, Legend } from 'recharts';
 
 // Words that mean the photo is not a fruit/vegetable when a user types a correction
@@ -33,6 +33,13 @@ const NON_PRODUCE_WORDS = new Set([
   'dog', 'cat', 'animal', 'pet', 'bird', 'car', 'bike', 'phone', 'laptop', 'book', 'bottle', 'cup',
   'table', 'chair', 'room', 'wall', 'object', 'nothing', 'not', 'none',
 ]);
+
+// Every produce type the app has shelf-life data for, for the "pick the right item" dropdown
+const KNOWN_PRODUCE = Object.keys(PRODUCE_DATA).sort();
+// "34 days" when there is time, "12 hours" when it is urgent (shelf life isn't precise to 0.1 h)
+const formatShelfLife = (hours: number) =>
+  hours >= 48 ? `${Math.round(hours / 24)} days` : `${Math.max(0, Math.round(hours))} ${Math.round(hours) === 1 ? 'hour' : 'hours'}`;
+const prettyName = (id: string) => id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
 /** Guess whether a typed label is produce: "human" or "my face" -> false, "kiwi" -> true. */
 function looksLikeProduce(label: string): boolean {
@@ -179,7 +186,7 @@ function LocationSelectorModal({ onClose, onSelect }: {
         <div className="p-6 border-b border-slate-100 flex items-center justify-between">
           <div>
             <h3 className="text-lg font-bold text-slate-800">Location & Storage Environment</h3>
-            <p className="text-[11px] text-slate-400 font-medium">Configure location and produce storage conditions</p>
+            <p className="text-[11px] text-slate-500 font-medium">Configure location and produce storage conditions</p>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-slate-50 rounded-full transition-colors"><X size={20} /></button>
         </div>
@@ -249,7 +256,7 @@ function LocationSelectorModal({ onClose, onSelect }: {
               >
                 <span className="text-xl">🏠</span>
                 <span className="text-xs font-bold leading-tight">Room Temp</span>
-                <span className="text-[9px] text-slate-400">~20°C / Indoor</span>
+                <span className="text-[10px] text-slate-500">~20°C / Indoor</span>
               </button>
 
               <button
@@ -263,7 +270,7 @@ function LocationSelectorModal({ onClose, onSelect }: {
               >
                 <span className="text-xl">☀️</span>
                 <span className="text-xs font-bold leading-tight">Outside</span>
-                <span className="text-[9px] text-slate-400">Ambient Weather</span>
+                <span className="text-[10px] text-slate-500">Ambient Weather</span>
               </button>
 
               <button
@@ -277,7 +284,7 @@ function LocationSelectorModal({ onClose, onSelect }: {
               >
                 <span className="text-xl">❄️</span>
                 <span className="text-xs font-bold leading-tight">Refrigerator</span>
-                <span className="text-[9px] text-slate-400">Cold Storage</span>
+                <span className="text-[10px] text-slate-500">Cold Storage</span>
               </button>
             </div>
           </div>
@@ -384,6 +391,10 @@ export default function App() {
   const [lastSavedId, setLastSavedId] = useState<string | null>(null); // Firestore doc ID
   const [feedbackState, setFeedbackState] = useState<'none' | 'correct' | 'incorrect'>('none');
   const [showCorrection, setShowCorrection] = useState(false);
+  const [produceTypeCount, setProduceTypeCount] = useState<number | null>(null); // from the trained model
+  useEffect(() => {
+    getModelInfo().then(i => setProduceTypeCount(i.labels ? i.labels.classes.filter(c => c !== 'not_produce').length : null)).catch(() => {});
+  }, []);
   const [customLabel, setCustomLabel] = useState(''); // free-text answer to "what is it?"
   const [feedbackSaveState, setFeedbackSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [feedbackMessage, setFeedbackMessage] = useState('');
@@ -392,7 +403,7 @@ export default function App() {
   const [alertEnabled, setAlertEnabled] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState<number>(12); // Alert when 12h left
   const [showThresholdPicker, setShowThresholdPicker] = useState(false);
-  const [resultActiveTab, setResultActiveTab] = useState<'overview' | 'pipeline' | 'rag' | 'ml'>('overview');
+  const [resultActiveTab, setResultActiveTab] = useState<'overview' | 'ai' | 'how'>('overview');
   
   // Environment State (Saved location, temperature, and moisture)
   const [homeWeather, setHomeWeather] = useState<WeatherData | null>(() => {
@@ -407,7 +418,7 @@ export default function App() {
     return localStorage.getItem('biofresh_location_locked') === 'true';
   });
   const [locationName, setLocationName] = useState<string>(() => {
-    return localStorage.getItem('biofresh_location_name') || 'Set Location...';
+    return localStorage.getItem('biofresh_location_name') || 'Set your location';
   });
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [tempLatLon, setTempLatLon] = useState<{lat: number, lng: number} | null>(null);
@@ -489,10 +500,10 @@ export default function App() {
           setHomeWeather(JSON.parse(savedWeather));
           setLocationName(savedName);
         } catch {
-          setLocationName('Set Location...');
+          setLocationName('Set your location');
         }
       } else {
-        setLocationName('Set Location...');
+        setLocationName('Set your location');
       }
     }
   }, [user, authReady]);
@@ -1116,6 +1127,22 @@ export default function App() {
   };
 
   /**
+   * applyAgentReminder
+   *
+   * The Kitchen Rescue Agent (Agentic AI) asked for an expiry reminder on one of the user's items:
+   * turn the alert on locally and in Firestore.
+   */
+  const applyAgentReminder = (itemId: string, hoursBeforeExpiry: number) => {
+    setHistory(prev => prev.map(h => h.id === itemId ? { ...h, alertEnabled: true, alertThreshold: hoursBeforeExpiry } : h));
+    if (itemId === lastSavedId) {
+      setAlertEnabled(true);
+      setAlertThreshold(hoursBeforeExpiry);
+    }
+    updatePrediction(itemId, { alertEnabled: true, alertThreshold: hoursBeforeExpiry })
+      .catch(err => console.warn("Could not save agent reminder:", err));
+  };
+
+  /**
    * updateAlertThreshold
    * 
    * Changes how many hours before expiration the alert should fire (e.g., 6h, 12h, 24h).
@@ -1193,8 +1220,23 @@ export default function App() {
     }
   };
 
+  // How much longer the scanned item would last at 4°C (Arrhenius engine), shown on the result card
+  const fridgeGainLabel = (() => {
+    if (!prediction || rul === null) return '';
+    if ((localStorage.getItem('biofresh_storage_env') || 'room') === 'refrigerator') return 'Already ✓';
+    if (rul < 1) return '–';
+    const fridgeRul = calculateRUL(prediction.quality_score, calculateDecayRate(prediction.produce_type, 277.15));
+    const gainDays = (fridgeRul - rul) / 24;
+    return gainDays >= 1 ? `+${Math.round(gainDays)} days` : gainDays * 24 >= 1 ? `+${Math.round(gainDays * 24)} h` : 'No gain';
+  })();
+  const expiringSoonCount = history.filter(h => {
+    const scanned = h.timestamp instanceof Date ? h.timestamp.getTime() : new Date(h.timestamp).getTime();
+    const left = h.rulHours - (Date.now() - scanned) / 3_600_000;
+    return left > 0 && left < 24;
+  }).length;
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-teal-100 pb-24">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-teal-100 pb-36">
       {/* Header */}
         <header className="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-md border-b border-slate-200">
           <div className="max-w-md mx-auto px-6 py-4 flex items-center justify-between">
@@ -1206,14 +1248,6 @@ export default function App() {
             </div>
             
             <div className="flex items-center gap-2">
-              <button 
-                onClick={() => setView('history')}
-                className={`p-2 rounded-full transition-colors ${view === 'history' ? 'bg-teal-50 text-[#0097B2]' : 'hover:bg-slate-100 text-slate-600'}`}
-                title="View History"
-              >
-                <HistoryIcon size={20} />
-              </button>
-
               {user && !user.isAnonymous ? (
                 <div className="flex items-center gap-2">
                   {user.photoURL ? (
@@ -1265,7 +1299,7 @@ export default function App() {
         </header>
 
         {/* Main Content */}
-        <main className="max-w-md mx-auto pt-24 px-6">
+        <main className={`mx-auto pt-24 px-6 ${view === 'result' ? 'max-w-md lg:max-w-5xl' : 'max-w-md'}`}>
           <AnimatePresence mode="wait">
             {view === 'home' && (
               <motion.div 
@@ -1277,7 +1311,7 @@ export default function App() {
               >
                 <div className="space-y-3">
                   <h2 className="text-3xl font-extrabold leading-tight">Predict Freshness. <br/><span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-600 to-teal-500">Reduce Waste.</span></h2>
-                  <p className="text-slate-500 leading-relaxed">Scan your produce to see exactly how many hours of shelf life remain, powered by AI & Arrhenius kinetics.</p>
+                  <p className="text-slate-600 leading-relaxed">Snap a fruit or vegetable to see how long it will stay fresh. A trained AI model recognises it, and storage-temperature science predicts its shelf life.</p>
                 </div>
 
                 {/* Environment Display */}
@@ -1292,13 +1326,15 @@ export default function App() {
                     <div>
                       <h4 className="text-sm font-bold text-slate-800 line-clamp-1">{locationName}</h4>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-[#1AAB5F]">
-                          {homeWeather ? `${(homeWeather.temperature_kelvin - 273.15).toFixed(1)}°C` : '--°C'}
-                        </span>
-                        <span className="text-slate-300">•</span>
-                        <span className="text-xs font-bold text-[#0097B2]">
-                          {homeWeather ? `${homeWeather.humidity_percent}% Moisture` : '--%'}
-                        </span>
+                        {homeWeather ? (
+                          <>
+                            <span className="text-xs font-bold text-[#1AAB5F]">{(homeWeather.temperature_kelvin - 273.15).toFixed(1)}°C</span>
+                            <span className="text-slate-300">•</span>
+                            <span className="text-xs font-bold text-[#0097B2]">{homeWeather.humidity_percent}% humidity</span>
+                          </>
+                        ) : (
+                          <span className="text-xs font-semibold text-slate-500">Tap to use local weather</span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1312,30 +1348,27 @@ export default function App() {
                     }`}
                   >
                     {isLocationLocked ? <Lock size={18} /> : <Unlock size={18} />}
-                    <span className="text-[9px] font-bold uppercase tracking-tighter">
-                      {isLocationLocked ? 'Locked' : 'Lock?'}
+                    <span className="text-[10px] font-bold uppercase tracking-tighter">
+                      {isLocationLocked ? 'Locked' : 'Lock'}
                     </span>
                   </button>
                 </div>
 
+              {/* Real numbers instead of marketing filler */}
               <div className="grid grid-cols-2 gap-4">
-                <div className="p-6 bg-white rounded-4xl border border-slate-100 shadow-sm flex flex-col gap-3">
-                  <div className="w-10 h-10 rounded-2xl bg-orange-50 text-orange-600 flex items-center justify-center">
-                    <Thermometer size={20} />
+                <div className="p-5 bg-white rounded-4xl border border-slate-100 shadow-sm flex flex-col gap-2">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                    <Leaf size={20} />
                   </div>
-                  <div className="space-y-0.5">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Environment</span>
-                    <p className="text-sm font-bold text-slate-800">Smart Tracking</p>
-                  </div>
+                  <p className="text-2xl font-extrabold text-slate-800 leading-none">{produceTypeCount ?? '–'}</p>
+                  <p className="text-xs font-semibold text-slate-500">fruits & vegetables the AI recognises</p>
                 </div>
-                <div className="p-6 bg-white rounded-4xl border border-slate-100 shadow-sm flex flex-col gap-3">
-                  <div className="w-10 h-10 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center">
-                    <Droplets size={20} />
+                <div className="p-5 bg-white rounded-4xl border border-slate-100 shadow-sm flex flex-col gap-2">
+                  <div className="w-10 h-10 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center">
+                    <Clock size={20} />
                   </div>
-                  <div className="space-y-0.5">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Prediction</span>
-                    <p className="text-sm font-bold text-slate-800">±1.2hr Accuracy</p>
-                  </div>
+                  <p className="text-2xl font-extrabold text-slate-800 leading-none">{expiringSoonCount}</p>
+                  <p className="text-xs font-semibold text-slate-500">{history.length ? `of your ${history.length} scanned item${history.length === 1 ? '' : 's'} expire within 24 h` : 'items expiring soon (scan something to start)'}</p>
                 </div>
               </div>
 
@@ -1370,7 +1403,7 @@ export default function App() {
                   {/* Active Reminders Section */}
                   {history.some(item => item.alertEnabled) && (
                     <div className="space-y-4 pt-4">
-                      <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 flex items-center gap-2">
                         <Bell size={14} className="text-[#0097B2]" /> Active Freshness Alerts
                       </h3>
                       <div className="space-y-2">
@@ -1390,7 +1423,7 @@ export default function App() {
                               <div>
                                 <h4 className="text-sm font-bold text-slate-800 capitalize">{alert.produceType.replace('_', ' ')}</h4>
                                 <div className="flex items-center gap-2">
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase">RUL: {alert.rulHours.toFixed(0)}h</p>
+                                  <p className="text-[10px] text-slate-500 font-bold uppercase">RUL: {alert.rulHours.toFixed(0)}h</p>
                                   {alert.alertThreshold && (
                                     <span className="text-[10px] text-[#0097B2] font-bold uppercase">Target: {alert.alertThreshold}h</span>
                                   )}
@@ -1528,8 +1561,9 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.2 }}
-              className="space-y-6 max-w-xl mx-auto"
+              className="max-w-xl mx-auto space-y-6 lg:max-w-none lg:grid lg:grid-cols-2 lg:gap-6 lg:items-start lg:space-y-0"
             >
+              <div className="space-y-6">
               {/* Primary Produce Freshness Hero Card */}
               <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-100 flex flex-col items-center text-center relative overflow-hidden">
                 {/* Visual Status Indicator & Quality Score Badge */}
@@ -1545,9 +1579,13 @@ export default function App() {
                   </span>
 
                   <span className="text-[11px] font-mono font-bold bg-slate-100 text-slate-600 px-2.5 py-0.5 rounded-full">
-                    Score: {(prediction.quality_score * 100).toFixed(0)}%
+                    Freshness {(prediction.quality_score * 100).toFixed(0)}%
                   </span>
                 </div>}
+
+                {isProduce && currentImage && (
+                  <img src={currentImage} alt="Scanned produce" className="w-20 h-20 object-cover rounded-2xl border border-slate-200 mb-3" />
+                )}
 
                 {/* Produce Name & Verification Badge */}
                 <div className="flex flex-wrap items-center justify-center gap-2 mb-1">
@@ -1565,6 +1603,27 @@ export default function App() {
                     </span>
                   )}
                 </div>
+
+                {isProduce && (
+                  <div className="flex flex-col items-center gap-2 mb-2">
+                    {prediction.confidence_score != null && prediction.source !== 'feedback' && (
+                      prediction.low_confidence
+                        ? <span className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-0.5">Not sure: best guess ({Math.round(prediction.confidence_score * 100)}%). Please check below</span>
+                        : <span className="text-[11px] font-semibold text-slate-500">{Math.round(prediction.confidence_score * 100)}% sure</span>
+                    )}
+                    {feedbackState === 'none' && (prediction.alternative_candidates || []).length > 0 && (
+                      <div className="flex flex-wrap justify-center items-center gap-1 text-[11px]">
+                        <span className="text-slate-500 font-medium">Not {prettyName(prediction.produce_type)}?</span>
+                        {(prediction.alternative_candidates || []).slice(0, 2).map(a => (
+                          <button key={a.type} onClick={() => handleCorrection(a.type, true)}
+                            className="px-2 py-0.5 rounded-full border border-slate-200 bg-white hover:bg-slate-50 font-semibold text-slate-700">
+                            {prettyName(a.type)}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {prediction.source === 'feedback' && (
                   <p className="text-[11px] text-[#0097B2] bg-teal-50 border border-teal-100 rounded-xl px-3 py-1.5 mb-2 max-w-xs">
@@ -1591,44 +1650,45 @@ export default function App() {
                 )}
 
                 {nutrients && (
-                  <span className="text-[11px] text-slate-400 font-medium">
+                  <span className="text-[11px] text-slate-500 font-medium">
                     Estimated weight: <strong className="text-slate-600 font-semibold">{nutrients.weightG}g</strong>
                   </span>
                 )}
 
                 {/* Big Hero Remaining Useful Life Number */}
                 <div className="my-6 relative flex flex-col items-center">
+                  {/* Days when there is time, hours when it is urgent (the model isn't precise to 0.1 h) */}
                   <div className="flex items-baseline justify-center">
                     <span className="text-7xl sm:text-8xl font-black text-slate-800 tracking-tighter">
-                      {rul.toFixed(1)}
+                      {rul >= 48 ? Math.round(rul / 24) : Math.max(0, Math.round(rul))}
                     </span>
-                    <span className="text-sm sm:text-base font-bold text-slate-400 uppercase tracking-widest ml-1.5 font-mono">
-                      hrs
+                    <span className="text-base font-bold text-slate-500 ml-2">
+                      {rul >= 48 ? 'days' : Math.round(rul) === 1 ? 'hour' : 'hours'}
                     </span>
                   </div>
                   <div className="mt-2 bg-teal-50 text-[#0097B2] border border-teal-100 px-3.5 py-1 rounded-full text-xs font-bold">
-                    ≈ {(rul / 24).toFixed(1)} Days Shelf Life
+                    {rul < 1 ? 'Past its best: check before eating' : rul >= 48 ? `of shelf life left (about ${Math.round(rul)} hours)` : 'left: use it soon'}
                   </div>
                 </div>
 
                 {/* Quick Quick Environmental Telemetry Ticker */}
                 <div className="grid grid-cols-3 gap-2 w-full pt-4 border-t border-slate-100 text-center">
                   <div className="bg-slate-50/80 rounded-2xl p-2.5 border border-slate-100">
-                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Temp</span>
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">Temp</span>
                     <span className="text-sm font-bold text-slate-800">
                       {weather?.temperature_kelvin ? (weather.temperature_kelvin - 273.15).toFixed(1) : '20.0'}°C
                     </span>
                   </div>
                   <div className="bg-slate-50/80 rounded-2xl p-2.5 border border-slate-100">
-                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Humidity</span>
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">Humidity</span>
                     <span className="text-sm font-bold text-slate-800">
                       {weather?.humidity_percent || 60}%
                     </span>
                   </div>
                   <div className="bg-slate-50/80 rounded-2xl p-2.5 border border-slate-100">
-                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Decay Rate</span>
-                    <span className="text-sm font-bold text-[#0097B2] font-mono">
-                      {(prediction.quality_score / Math.max(0.1, rul)).toFixed(4)}/h
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">In the fridge</span>
+                    <span className="text-sm font-bold text-[#0097B2]">
+                      {fridgeGainLabel}
                     </span>
                   </div>
                 </div>
@@ -1708,29 +1768,16 @@ export default function App() {
                         <span>What is it? Pick one or type the name</span>
                         <button onClick={() => { setShowCorrection(false); setFeedbackState('none'); }} className="text-slate-400 hover:text-slate-600">Close</button>
                       </div>
+                      {/* Quick picks: the model's next-best guesses, plus "not a fruit/vegetable" */}
                       <div className="flex flex-wrap gap-1">
                         {[
-                          { type: 'banana', label: '🍌 Banana' },
-                          { type: 'avocado', label: '🥑 Avocado' },
-                          { type: 'apple', label: '🍎 Apple' },
-                          { type: 'tomato', label: '🍅 Tomato' },
-                          { type: 'orange', label: '🍊 Orange' },
-                          { type: 'lemon', label: '🍋 Lemon' },
-                          { type: 'mango', label: '🥭 Mango' },
-                          { type: 'leafy_greens', label: '🥬 Leafy Greens' },
-                          { type: 'papaya', label: '🍈 Papaya' },
-                          { type: 'lime', label: '🟢 Lime' },
-                          { type: 'cucumber', label: '🥒 Cucumber' },
-                          { type: 'strawberry', label: '🍓 Strawberry' },
-                          { type: 'bell_pepper', label: '🫑 Bell Pepper' },
-                          { type: 'carrot', label: '🥕 Carrot' },
-                          { type: 'potato', label: '🥔 Potato' },
-                          { type: 'not_produce', label: '🚫 Not a fruit/vegetable' }
+                          ...(prediction.alternative_candidates || []).map(a => ({ type: a.type, label: prettyName(a.type) })),
+                          ...(isProduce ? [{ type: 'not_produce', label: '🚫 Not a fruit/vegetable' }] : []),
                         ].filter(item => item.type !== prediction.produce_type).map(item => (
                           <button
                             key={item.type}
                             onClick={() => {
-                              handleCorrection(item.type);
+                              handleCorrection(item.type, item.type !== 'not_produce');
                               setShowCorrection(false);
                             }}
                             className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 transition-all"
@@ -1739,6 +1786,17 @@ export default function App() {
                           </button>
                         ))}
                       </div>
+                      {/* Every known fruit/vegetable */}
+                      <select
+                        value=""
+                        onChange={(e) => { if (e.target.value) handleCorrection(e.target.value, true); }}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 focus:outline-none focus:border-[#0097B2]"
+                      >
+                        <option value="">Choose from all {KNOWN_PRODUCE.length} fruits & vegetables…</option>
+                        {KNOWN_PRODUCE.filter(t => t !== prediction.produce_type).map(t => (
+                          <option key={t} value={t}>{prettyName(t)}</option>
+                        ))}
+                      </select>
                       <form
                         className="space-y-2 pt-1"
                         onSubmit={(e) => {
@@ -1779,14 +1837,15 @@ export default function App() {
                 </div>
               </div>
 
+              </div>
+              <div className="space-y-6">
               {isProduce && <>
               {/* Segmented Navigation Tabs to Keep UI Clean & Organized */}
-              <div className="grid grid-cols-4 gap-1.5 p-1 bg-slate-100/80 rounded-2xl border border-slate-200/60">
+              <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100/80 rounded-2xl border border-slate-200/60">
                 {[
                   { id: 'overview', label: 'Nutrition' },
-                  { id: 'rag', label: 'Advisor' },
-                  { id: 'pipeline', label: 'Vision' },
-                  { id: 'ml', label: 'ML Stack' },
+                  { id: 'ai', label: '✨ AI Assistant' },
+                  { id: 'how', label: 'How it works' },
                 ].map(tab => (
                   <button
                     key={tab.id}
@@ -1843,7 +1902,7 @@ export default function App() {
                           <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
                           Zero-Waste Kitchen Rescue
                         </h3>
-                        <span className="text-[10px] text-slate-400 font-medium font-mono">RUL &lt; 24h Trigger</span>
+                        <span className="text-[10px] text-slate-500 font-medium font-mono">RUL &lt; 24h Trigger</span>
                       </div>
 
                       <div className="space-y-2">
@@ -1855,7 +1914,7 @@ export default function App() {
                               </span>
                               <div>
                                 <h5 className="font-bold text-xs text-slate-800">{recipe.name}</h5>
-                                <p className="text-[10px] text-slate-400">High Nutri-Conversion • 15m Prep</p>
+                                <p className="text-[10px] text-slate-500">High Nutri-Conversion • 15m Prep</p>
                               </div>
                             </div>
                             <ChevronRight size={16} className="text-slate-300" />
@@ -1867,36 +1926,42 @@ export default function App() {
                 </div>
               )}
 
-              {/* TAB 2: RAG KNOWLEDGE ADVISOR */}
-              {resultActiveTab === 'rag' && (
-                <RAGKnowledgeAdvisor 
+              {/* TAB: GENERATIVE AI + AGENTIC AI (src/ai_engines on the server) */}
+              {resultActiveTab === 'ai' && (
+                <AIAssistant
+                  produceType={prediction.produce_type}
+                  qualityScore={prediction.quality_score}
+                  rulHours={rul}
+                  freshnessReliable={prediction.freshness_reliable}
+                  temperatureC={weather?.temperature_kelvin ? weather.temperature_kelvin - 273.15 : undefined}
+                  humidityPercent={weather?.humidity_percent}
+                  locationName={weather?.location_name || localStorage.getItem('biofresh_location_name') || undefined}
+                  storage={localStorage.getItem('biofresh_storage_env') || 'room'}
+                  history={history}
+                  onApplyReminder={applyAgentReminder}
+                />
+              )}
+              {resultActiveTab === 'ai' && (
+                <RAGKnowledgeAdvisor
                   produceType={prediction.produce_type}
                   qualityScore={prediction.quality_score}
                   rulHours={rul}
                 />
               )}
 
-              {/* TAB 3: STEP-BY-STEP COMPUTER VISION PIPELINE */}
-              {resultActiveTab === 'pipeline' && (
-                <PipelineVisualizer 
-                  imageUrl={currentImage}
+              {/* TAB: HOW IT WORKS (real numbers for this scan + real model metrics) */}
+              {resultActiveTab === 'how' && (
+                <HowItWorks
                   produceType={prediction.produce_type}
                   qualityScore={prediction.quality_score}
-                  temperatureK={weather?.temperature_kelvin || 293.15}
-                  humidity={weather?.humidity_percent || 60}
+                  confidence={prediction.confidence_score}
+                  freshnessReliable={prediction.freshness_reliable}
+                  source={prediction.source}
+                  matchedSimilarity={prediction.matched_feedback?.similarity}
+                  alternatives={prediction.alternative_candidates}
                   rulHours={rul}
-                  confidence={prediction.confidence_score || 0.94}
-                />
-              )}
-
-              {/* TAB 4: PYTORCH, CUDA, BF16 & XGBOOST ML ENGINE */}
-              {resultActiveTab === 'ml' && (
-                <MLArchitectureVisualizer 
-                  produceType={prediction.produce_type}
-                  qualityScore={prediction.quality_score}
                   temperatureK={weather?.temperature_kelvin || 293.15}
-                  humidity={weather?.humidity_percent || 60}
-                  rulHours={rul}
+                  storage={localStorage.getItem('biofresh_storage_env') || 'room'}
                 />
               )}
               </>}
@@ -1908,6 +1973,7 @@ export default function App() {
               >
                 <RefreshCw size={15} /> Discard & Start New Scan
               </button>
+              </div>
             </motion.div>
           )}
 
@@ -1988,13 +2054,13 @@ export default function App() {
                        <div className="flex-1 min-w-0">
                          <div className="flex items-center justify-between">
                            <h4 className="font-bold text-slate-800 capitalize truncate group-hover:text-[#1AAB5F] transition-colors">{item.produceType.replace('_', ' ')}</h4>
-                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{new Date(item.timestamp).toLocaleDateString()}</span>
+                           <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{new Date(item.timestamp).toLocaleDateString()}</span>
                          </div>
                          <div className="flex items-center gap-4 mt-2">
                            <div className="flex items-center gap-1.5 text-[#1AAB5F]">
                              <Leaf size={12} fill="currentColor" />
                              <span className="text-[10px] font-bold uppercase tracking-widest">
-                               {item.rulHours.toFixed(0)}h / {(item.rulHours / 24).toFixed(1)}d
+                               {formatShelfLife(item.rulHours)}
                              </span>
                            </div>
                            <div className="flex items-center gap-1.5 text-[#0097B2]">
@@ -2045,7 +2111,7 @@ export default function App() {
                 </button>
                 <div className="text-center">
                   <h3 className="font-bold text-slate-800">Scan Details</h3>
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                     Captured {new Date(selectedHistoryItem.timestamp).toLocaleString()}
                   </span>
                 </div>
@@ -2074,17 +2140,12 @@ export default function App() {
                   </h2>
                 </div>
                 <div className="relative">
-                   <div className="text-8xl font-light text-slate-800 tracking-tighter">
-                    {selectedHistoryItem.rulHours.toFixed(1)}
-                  </div>
-                  <div className="absolute top-2 -right-14 px-3 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-bold tracking-widest uppercase">
-                    hrs
-                  </div>
-                  <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-[#1AAB5F]/10 text-[#1AAB5F] px-4 py-1 rounded-full text-xs font-bold whitespace-nowrap">
-                    ≈ {(selectedHistoryItem.rulHours / 24).toFixed(1)} Days
+                   <div className="text-7xl font-light text-slate-800 tracking-tighter">
+                    {formatShelfLife(selectedHistoryItem.rulHours).split(' ')[0]}
+                    <span className="text-base font-bold text-slate-500 ml-2 tracking-normal">{formatShelfLife(selectedHistoryItem.rulHours).split(' ')[1]}</span>
                   </div>
                 </div>
-                <p className="text-slate-400 text-xs font-bold uppercase tracking-widest pt-6">Remaining Useful Life</p>
+                <p className="text-slate-500 text-xs font-bold uppercase tracking-widest pt-4">Shelf life at scan time</p>
                 
                 <div className="w-full pt-8 flex flex-col gap-4 border-t border-slate-50 mt-4">
                   <button 
@@ -2120,33 +2181,23 @@ export default function App() {
 
                 <div className="grid grid-cols-2 gap-8 w-full pt-8 border-t border-slate-50">
                   <div className="flex flex-col items-center gap-1">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Temperature</span>
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Temperature</span>
                     <span className="text-xl font-bold text-[#0097B2]">{(selectedHistoryItem.temperatureK - 273.15).toFixed(1)}°C</span>
                   </div>
                   <div className="flex flex-col items-center gap-1">
-                     <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Humidity</span>
+                     <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Humidity</span>
                     <span className="text-xl font-bold text-[#0097B2]">{selectedHistoryItem.humidity}%</span>
                   </div>
                 </div>
               </div>
 
-              {/* Historical Step-by-Step AI & Science Pipeline Breakdown */}
-              <PipelineVisualizer 
-                imageUrl={selectedHistoryItem.imageUrl}
-                produceType={selectedHistoryItem.produceType}
-                qualityScore={selectedHistoryItem.qualityScore}
-                temperatureK={selectedHistoryItem.temperatureK}
-                humidity={selectedHistoryItem.humidity}
-                rulHours={selectedHistoryItem.rulHours}
-                confidence={0.95}
-              />
 
               <div className="bg-white rounded-4xl p-8 shadow-sm border border-slate-100 space-y-6">
                 <div className="flex justify-between items-end">
                   <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
                     <Info size={12} /> Historical Nutrition (Approximate)
                   </h3>
-                  <span className="text-[10px] font-bold text-slate-400 tracking-tighter uppercase font-mono">Estimated Content</span>
+                  <span className="text-[10px] font-bold text-slate-500 tracking-tighter uppercase font-mono">Estimated Content</span>
                 </div>
                 <div className="space-y-4">
                   {getNutrientRetention(selectedHistoryItem.produceType, selectedHistoryItem.qualityScore).nutrients.map(n => (
@@ -2196,20 +2247,23 @@ export default function App() {
 
       {/* Nav */}
       <nav className="fixed bottom-6 left-6 right-6 max-w-md mx-auto z-40">
-        <div className="bg-white/90 backdrop-blur-xl border border-slate-200/50 px-8 py-4 flex justify-around items-center rounded-full shadow-2xl shadow-slate-200/50">
-          <button onClick={reset} className={`p-2 transition-all hover:scale-110 ${view === 'home' ? 'text-[#1AAB5F]' : 'text-slate-300'}`}>
-            <Leaf size={24} strokeWidth={2.5} />
+        <div className="bg-white/90 backdrop-blur-xl border border-slate-200/50 px-8 py-3 flex justify-around items-center rounded-full shadow-2xl shadow-slate-200/50">
+          <button onClick={reset} className={`flex flex-col items-center gap-0.5 p-1 transition-all ${view === 'home' ? 'text-[#1AAB5F]' : 'text-slate-500'}`}>
+            <Leaf size={22} strokeWidth={2.5} />
+            <span className="text-[10px] font-bold">Home</span>
           </button>
           <button 
             onClick={startScanner} 
             className="w-14 h-14 bg-[#1AAB5F] rounded-full -mt-12 border-4 border-slate-50 flex items-center justify-center text-white shadow-xl shadow-green-200 transition-all hover:scale-110 active:scale-95"
+            aria-label="Scan with camera"
           >
             <Camera size={28} strokeWidth={2.5} />
           </button>
           <button 
             onClick={() => user ? setView('history') : handleLogin()} 
-            className={`p-2 transition-all hover:scale-110 ${view === 'history' ? 'text-[#0097B2]' : 'text-slate-300'}`}>
-            <HistoryIcon size={24} strokeWidth={2.5} />
+            className={`flex flex-col items-center gap-0.5 p-1 transition-all ${view === 'history' ? 'text-[#0097B2]' : 'text-slate-500'}`}>
+            <HistoryIcon size={22} strokeWidth={2.5} />
+            <span className="text-[10px] font-bold">History</span>
           </button>
         </div>
       </nav>

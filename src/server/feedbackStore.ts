@@ -23,6 +23,7 @@ export interface FeedbackEntry {
   predicted: string; // what the model predicted
   correct: boolean; // true if the user confirmed the prediction
   is_produce: boolean; // false for labels like "human" or "not_produce"
+  model_version?: string; // embeddings are only comparable within the same trained model
   image: string; // path relative to data/feedback/
   embedding: number[];
   created_at: string;
@@ -59,6 +60,7 @@ export function addFeedback(entry: {
   correct: boolean;
   isProduce: boolean;
   jpeg: Buffer;
+  modelVersion?: string;
   embedding: Float32Array;
 }): FeedbackEntry {
   const entries = load();
@@ -73,6 +75,7 @@ export function addFeedback(entry: {
     predicted: entry.predicted,
     correct: entry.correct,
     is_produce: entry.isProduce && entry.label !== "not_produce",
+    model_version: entry.modelVersion,
     image: rel.replace(/\\/g, "/"),
     embedding: Array.from(entry.embedding, v => Number(v.toFixed(5))),
     created_at: new Date().toISOString(),
@@ -86,9 +89,12 @@ export function addFeedback(entry: {
  * Most similar saved feedback image (cosine similarity; embeddings are L2-normalised).
  * On a tie (e.g. the same photo answered twice) the newest answer wins.
  */
-export function findClosest(embedding: Float32Array): { entry: FeedbackEntry; similarity: number } | null {
+export function findClosest(embedding: Float32Array, modelVersion?: string): { entry: FeedbackEntry; similarity: number } | null {
   let best: { entry: FeedbackEntry; similarity: number } | null = null;
   for (const entry of load()) {
+    // A retrained model produces different embeddings, so only compare feedback from the same model
+    // (the photos themselves are still used by the next `npm run train`)
+    if (entry.model_version !== modelVersion || entry.embedding.length !== embedding.length) continue;
     let dot = 0;
     for (let i = 0; i < embedding.length; i++) dot += embedding[i] * entry.embedding[i];
     const tie = best !== null && Math.abs(dot - best.similarity) <= 1e-4;

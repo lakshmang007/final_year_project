@@ -1,7 +1,7 @@
 /**
- * RAG Knowledge Vector Store & Upcycling Advisor
+ * RAG Knowledge Base & Upcycling Advisor
  * 
- * Simulates vector embedding similarity search (FAISS-style cosine distance)
+ * Retrieval by keyword/metadata scoring (produce tag, freshness range, category), not vector embeddings,
  * for:
  * 1. Culinary zero-waste rescue recipes (freshness < 0.40)
  * 2. Precision storage advice & temperature/humidity optimization
@@ -253,7 +253,7 @@ export const KNOWLEDGE_CORPUS: KnowledgeDocument[] = [
 ];
 
 /**
- * Fast simulated embedding & semantic similarity scorer
+ * Relevance scorer for retrieval
  * Computes semantic similarity based on token overlap + category weights + freshness window.
  */
 function scoreDocumentMatch(

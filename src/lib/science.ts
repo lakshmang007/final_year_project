@@ -199,6 +199,225 @@ export const PRODUCE_DATA: Record<string, ProduceMetadata> = {
       'Dietary Fiber': { value: 2.1, unit: 'g' },
       'Magnesium': { value: 23, unit: 'mg' },
     }
+  },
+  // Added with the real-world dataset (kritikseth/fruit-and-vegetable-image-recognition).
+  // A is calibrated so a fresh item (Q=1) at 20°C lasts its typical room-temperature shelf life;
+  // nutrients are USDA FoodData Central values for the raw food, per 100 g.
+  grapes: {
+    A: 6.85e+08, // ~3 days at 20°C
+    Ea: 60000,
+    avgWeightG: 150,
+    nutrientsPer100g: {
+      'Vitamin K': { value: 14.6, unit: 'μg' },
+      'Vitamin C': { value: 3.2, unit: 'mg' },
+      'Potassium': { value: 191, unit: 'mg' },
+      'Dietary Fiber': { value: 0.9, unit: 'g' },
+      'Antioxidants': { value: 1.2, unit: 'mmol' },
+    }
+  },
+  kiwi: {
+    A: 4.11e+08, // ~5 days at 20°C
+    Ea: 60000,
+    avgWeightG: 75,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 92.7, unit: 'mg' },
+      'Vitamin K': { value: 40.3, unit: 'μg' },
+      'Potassium': { value: 312, unit: 'mg' },
+      'Folate': { value: 25, unit: 'μg' },
+      'Dietary Fiber': { value: 3.0, unit: 'g' },
+    }
+  },
+  pear: {
+    A: 4.11e+08, // ~5 days at 20°C
+    Ea: 60000,
+    avgWeightG: 178,
+    nutrientsPer100g: {
+      'Dietary Fiber': { value: 3.1, unit: 'g' },
+      'Vitamin C': { value: 4.3, unit: 'mg' },
+      'Potassium': { value: 116, unit: 'mg' },
+      'Vitamin K': { value: 4.4, unit: 'μg' },
+    }
+  },
+  pomegranate: {
+    A: 1.47e+08, // ~14 days at 20°C
+    Ea: 60000,
+    avgWeightG: 280,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 10.2, unit: 'mg' },
+      'Vitamin K': { value: 16.4, unit: 'μg' },
+      'Folate': { value: 38, unit: 'μg' },
+      'Potassium': { value: 236, unit: 'mg' },
+      'Dietary Fiber': { value: 4.0, unit: 'g' },
+    }
+  },
+  pineapple: {
+    A: 6.85e+08, // ~3 days at 20°C
+    Ea: 60000,
+    avgWeightG: 905,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 47.8, unit: 'mg' },
+      'Manganese': { value: 0.93, unit: 'mg' },
+      'Potassium': { value: 109, unit: 'mg' },
+      'Dietary Fiber': { value: 1.4, unit: 'g' },
+    }
+  },
+  watermelon: {
+    A: 2.06e+08, // ~10 days at 20°C
+    Ea: 60000,
+    avgWeightG: 286,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 8.1, unit: 'mg' },
+      'Vitamin A': { value: 28, unit: 'μg' },
+      'Lycopene': { value: 4.5, unit: 'mg' },
+      'Potassium': { value: 112, unit: 'mg' },
+    }
+  },
+  onion: {
+    A: 6.85e+07, // ~30 days at 20°C
+    Ea: 60000,
+    avgWeightG: 110,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 7.4, unit: 'mg' },
+      'Vitamin B6': { value: 0.12, unit: 'mg' },
+      'Folate': { value: 19, unit: 'μg' },
+      'Potassium': { value: 146, unit: 'mg' },
+      'Dietary Fiber': { value: 1.7, unit: 'g' },
+    }
+  },
+  garlic: {
+    A: 3.43e+07, // ~60 days at 20°C
+    Ea: 60000,
+    avgWeightG: 40,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 31.2, unit: 'mg' },
+      'Vitamin B6': { value: 1.24, unit: 'mg' },
+      'Manganese': { value: 1.67, unit: 'mg' },
+      'Potassium': { value: 401, unit: 'mg' },
+    }
+  },
+  ginger: {
+    A: 1.47e+08, // ~14 days at 20°C
+    Ea: 60000,
+    avgWeightG: 50,
+    nutrientsPer100g: {
+      'Potassium': { value: 415, unit: 'mg' },
+      'Magnesium': { value: 43, unit: 'mg' },
+      'Vitamin B6': { value: 0.16, unit: 'mg' },
+      'Vitamin C': { value: 5.0, unit: 'mg' },
+    }
+  },
+  cabbage: {
+    A: 2.94e+08, // ~7 days at 20°C
+    Ea: 60000,
+    avgWeightG: 900,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 36.6, unit: 'mg' },
+      'Vitamin K': { value: 76, unit: 'μg' },
+      'Folate': { value: 43, unit: 'μg' },
+      'Potassium': { value: 170, unit: 'mg' },
+      'Dietary Fiber': { value: 2.5, unit: 'g' },
+    }
+  },
+  cauliflower: {
+    A: 5.14e+08, // ~4 days at 20°C
+    Ea: 60000,
+    avgWeightG: 575,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 48.2, unit: 'mg' },
+      'Vitamin K': { value: 15.5, unit: 'μg' },
+      'Folate': { value: 57, unit: 'μg' },
+      'Potassium': { value: 299, unit: 'mg' },
+      'Dietary Fiber': { value: 2.0, unit: 'g' },
+    }
+  },
+  eggplant: {
+    A: 6.85e+08, // ~3 days at 20°C
+    Ea: 60000,
+    avgWeightG: 458,
+    nutrientsPer100g: {
+      'Dietary Fiber': { value: 3.0, unit: 'g' },
+      'Potassium': { value: 229, unit: 'mg' },
+      'Folate': { value: 22, unit: 'μg' },
+      'Vitamin K': { value: 3.5, unit: 'μg' },
+    }
+  },
+  corn: {
+    A: 1.03e+09, // ~2 days at 20°C
+    Ea: 60000,
+    avgWeightG: 100,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 6.8, unit: 'mg' },
+      'Folate': { value: 42, unit: 'μg' },
+      'Potassium': { value: 270, unit: 'mg' },
+      'Dietary Fiber': { value: 2.0, unit: 'g' },
+    }
+  },
+  beetroot: {
+    A: 2.94e+08, // ~7 days at 20°C
+    Ea: 60000,
+    avgWeightG: 82,
+    nutrientsPer100g: {
+      'Folate': { value: 109, unit: 'μg' },
+      'Potassium': { value: 325, unit: 'mg' },
+      'Vitamin C': { value: 4.9, unit: 'mg' },
+      'Dietary Fiber': { value: 2.8, unit: 'g' },
+    }
+  },
+  sweet_potato: {
+    A: 9.79e+07, // ~21 days at 20°C
+    Ea: 60000,
+    avgWeightG: 130,
+    nutrientsPer100g: {
+      'Vitamin A': { value: 709, unit: 'μg' },
+      'Potassium': { value: 337, unit: 'mg' },
+      'Dietary Fiber': { value: 3.0, unit: 'g' },
+      'Vitamin C': { value: 2.4, unit: 'mg' },
+    }
+  },
+  chilli_pepper: {
+    A: 4.11e+08, // ~5 days at 20°C
+    Ea: 60000,
+    avgWeightG: 45,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 143.7, unit: 'mg' },
+      'Vitamin B6': { value: 0.51, unit: 'mg' },
+      'Vitamin A': { value: 48, unit: 'μg' },
+      'Potassium': { value: 322, unit: 'mg' },
+    }
+  },
+  peas: {
+    A: 1.03e+09, // ~2 days at 20°C
+    Ea: 60000,
+    avgWeightG: 150,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 40, unit: 'mg' },
+      'Vitamin K': { value: 24.8, unit: 'μg' },
+      'Folate': { value: 65, unit: 'μg' },
+      'Dietary Fiber': { value: 5.7, unit: 'g' },
+      'Potassium': { value: 244, unit: 'mg' },
+    }
+  },
+  radish: {
+    A: 5.14e+08, // ~4 days at 20°C
+    Ea: 60000,
+    avgWeightG: 100,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 14.8, unit: 'mg' },
+      'Folate': { value: 25, unit: 'μg' },
+      'Potassium': { value: 233, unit: 'mg' },
+      'Dietary Fiber': { value: 1.6, unit: 'g' },
+    }
+  },
+  turnip: {
+    A: 2.94e+08, // ~7 days at 20°C
+    Ea: 60000,
+    avgWeightG: 120,
+    nutrientsPer100g: {
+      'Vitamin C': { value: 21, unit: 'mg' },
+      'Folate': { value: 15, unit: 'μg' },
+      'Potassium': { value: 191, unit: 'mg' },
+      'Dietary Fiber': { value: 1.8, unit: 'g' },
+    }
   }
 };
 
@@ -288,6 +507,7 @@ export function getNutrientRetention(type: string, qualityScore: number): { weig
     'Magnesium': 0.3,
     'Iron': 0.3,
     'Calcium': 0.3,
+    'Manganese': 0.3,
     'Dietary Fiber': 0.1,
     'Lycopene': 0.9,
     'Quercetin': 0.9,
