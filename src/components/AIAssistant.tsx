@@ -122,6 +122,7 @@ export function AIAssistant(p: Props) {
           </button>
         )}
         {planError && <p className="text-[11px] text-rose-600">{planError}</p>}
+        {plan?.note && <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-1.5">{plan.note}</p>}
         {plan && (
           <div className="space-y-3 text-left">
             <p className="text-sm font-bold text-slate-800 flex items-start gap-1.5">
@@ -173,7 +174,8 @@ export function AIAssistant(p: Props) {
           </button>
         </form>
         {agentError && <p className="text-[11px] text-rose-600">{agentError}</p>}
-        {agentLoading && <p className="text-[11px] text-slate-400 flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> The agent is planning and calling tools…</p>}
+        {agentLoading && <p className="text-[11px] text-slate-500 flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> The agent is planning and calling tools (can take up to a minute)…</p>}
+        {agent?.note && !agentLoading && <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-1.5">{agent.note}</p>}
         {agent && !agentLoading && (
           <div className="space-y-3 text-left">
             <ol className="relative border-l-2 border-slate-100 ml-2 space-y-2">

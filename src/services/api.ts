@@ -152,6 +152,7 @@ export interface AIStatus { available: boolean; provider: string; model: string 
 export interface RescuePlanResult {
   mode: 'llm' | 'offline';
   model: string | null;
+  note?: string;
   plan: {
     headline: string;
     urgency: 'low' | 'medium' | 'high';
@@ -166,6 +167,7 @@ export interface RescuePlanResult {
 export interface AgentRunResult {
   mode: 'llm' | 'offline';
   model: string | null;
+  note?: string;
   answer: string;
   steps: { tool: string; args: Record<string, unknown>; result: unknown; thought?: string }[];
   actions: { type: 'set_reminder'; item_id: string; produce: string; hours_before_expiry: number }[];

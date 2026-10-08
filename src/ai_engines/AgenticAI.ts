@@ -23,10 +23,11 @@
  * so the feature keeps working and is clearly labelled.
  */
 import type { Content } from "@google/genai";
-import { getChatModel, type ChatModel } from "./llm";
+import { getChatModel, withDeadline, type ChatModel } from "./llm";
 import { TOOL_DECLARATIONS, runTool, hoursLeft, type AgentContext } from "./tools";
 
 export const MAX_STEPS = 6;
+const AGENT_DEADLINE_MS = 75_000; // after this, finish with the offline plan instead
 
 export interface AgentStep {
   tool: string;
@@ -38,6 +39,7 @@ export interface AgentStep {
 export interface AgentResult {
   mode: "llm" | "offline";
   model: string | null;
+  note?: string; // why the offline plan was used although Gemini is configured
   answer: string;
   steps: AgentStep[];
   actions: AgentContext["actions"];
@@ -55,6 +57,17 @@ Rules:
 export async function runKitchenAgent(goal: string, ctx: AgentContext, model?: ChatModel | null): Promise<AgentResult> {
   const llm = model === undefined ? await getChatModel() : model;
   if (!llm) return runOfflinePlan(goal, ctx);
+  try {
+    return await withDeadline(runLlmAgent(goal, ctx, llm), AGENT_DEADLINE_MS);
+  } catch (e: any) {
+    // Gemini busy, slow or failing: finish with the same tools in a fixed order
+    console.warn("Agent fell back to the offline plan:", e?.message);
+    const fresh: AgentContext = { ...ctx, actions: [] };
+    return { ...runOfflinePlan(goal, fresh), note: "Gemini was busy or slow, so the agent used its offline plan with the same tools." };
+  }
+}
+
+async function runLlmAgent(goal: string, ctx: AgentContext, llm: ChatModel): Promise<AgentResult> {
 
   const history: Content[] = [{ role: "user", parts: [{ text: goal }] }];
   const steps: AgentStep[] = [];

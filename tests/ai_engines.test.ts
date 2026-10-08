@@ -158,3 +158,41 @@ test("other errors (e.g. quota) are not treated as a retired model", () => {
   assert.equal(isModelUnavailable(new Error("429 RESOURCE_EXHAUSTED: quota exceeded")), false);
   assert.equal(isModelUnavailable(new Error("models/x is not found for API version v1beta")), true);
 });
+
+import { isModelBusy, withDeadline } from "../src/ai_engines/llm";
+
+test("a busy (503) model is skipped for that call only; the next call tries it first again", async () => {
+  const tried: string[] = [];
+  let busy = true;
+  const fakeAi: any = { models: { generateContent: async ({ model }: { model: string }) => {
+    tried.push(model);
+    if (model === "gemini-3.8-flash" && busy) throw Object.assign(new Error('{"error":{"code":503,"message":"This model is currently experiencing high demand.","status":"UNAVAILABLE"}}'), { status: 503 });
+    return { text: '{"ok":true}' };
+  } } };
+  const m = geminiChatModel(fakeAi, ["gemini-3.8-flash", "gemini-flash-latest"]);
+  await m.json({ system: "", prompt: "x", schema: {} });
+  busy = false;
+  await m.json({ system: "", prompt: "x", schema: {} });
+  assert.deepEqual(tried, ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.8-flash"]);
+  assert.equal(isModelBusy(new Error("AI timed out after 20 s")), true);
+});
+
+test("GenAI and the agent fall back to the offline plan when Gemini fails", async () => {
+  const failing: ChatModel = {
+    name: "failing",
+    async chat() { throw new Error("503 UNAVAILABLE high demand"); },
+    async json() { throw new Error("503 UNAVAILABLE high demand"); },
+  };
+  const plan = await generateRescuePlan({ produce_type: "banana", quality_score: 0.5, rul_hours: 30 }, failing);
+  assert.equal(plan.mode, "offline");
+  assert.match(plan.note ?? "", /busy or slow/);
+  const agent = await runKitchenAgent("what first?", ctx(), failing);
+  assert.equal(agent.mode, "offline");
+  assert.match(agent.note ?? "", /busy or slow/);
+  assert.ok(agent.steps.length > 0);
+});
+
+test("withDeadline rejects slow work", async () => {
+  await assert.rejects(withDeadline(new Promise(r => setTimeout(r, 200)), 20), /timed out/);
+  assert.equal(await withDeadline(Promise.resolve(7), 1000), 7);
+});

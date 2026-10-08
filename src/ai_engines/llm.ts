@@ -49,11 +49,22 @@ export function rankModels(names: string[]): string[] {
   return [...new Set([...stable, ...latest, ...other])];
 }
 
-/** True when Google says this model can't be used (retired, not found, not for this key). */
+/** True when Google says this model can't be used at all (retired, not found, not for this key). */
 export function isModelUnavailable(e: any): boolean {
   const msg = String(e?.message ?? e ?? "");
   return e?.status === 404 || /\b404\b|NOT_FOUND|no longer available|not found|not supported for generateContent/i.test(msg);
 }
+
+/** True for temporary trouble: the model is overloaded ("high demand", 503) or the call timed out. */
+export function isModelBusy(e: any): boolean {
+  const msg = String(e?.message ?? e ?? "");
+  return e?.status === 503 || e?.name === "AbortError" ||
+    /\b503\b|UNAVAILABLE|high demand|overloaded|timed? ?out|deadline|aborted/i.test(msg);
+}
+
+// Each Gemini request gives up after 20 s with at most one retry (the SDK's default is 5 attempts
+// with up to 60 s between them, which made a busy model look frozen for minutes).
+export const REQUEST_TIMEOUT_MS = 20_000;
 
 async function listModels(ai: GoogleGenAI): Promise<string[]> {
   const names: string[] = [];
@@ -69,15 +80,17 @@ async function listModels(ai: GoogleGenAI): Promise<string[]> {
  * it moves to the next one and retries, so a retired model never breaks the app.
  */
 export function geminiChatModel(ai: Pick<GoogleGenAI, "models">, candidates: string[]): ChatModel {
-  let i = 0;
+  let i = 0; // best model that still exists; retired models are skipped for good
   const call = async <R,>(fn: (model: string) => Promise<R>): Promise<R> => {
-    for (;;) {
+    // A busy model (overloaded / timed out) is skipped for this call only: it is tried first again next time
+    for (let j = i; ; j++) {
       try {
-        return await fn(candidates[i]);
+        return await fn(candidates[j]);
       } catch (e) {
-        if (!isModelUnavailable(e) || i >= candidates.length - 1) throw e;
-        console.warn(`Gemini model ${candidates[i]} unavailable, switching to ${candidates[i + 1]}`);
-        i++;
+        const gone = isModelUnavailable(e), busy = isModelBusy(e);
+        if ((!gone && !busy) || j >= candidates.length - 1) throw e;
+        console.warn(`Gemini model ${candidates[j]} ${gone ? "unavailable" : "busy"}, trying ${candidates[j + 1]}`);
+        if (gone && j === i) i++;
       }
     }
   };
@@ -120,7 +133,10 @@ export function getChatModel(): Promise<ChatModel | null> {
   if (!modelPromise) {
     modelPromise = (async () => {
       try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const ai = new GoogleGenAI({
+          apiKey: process.env.GEMINI_API_KEY,
+          httpOptions: { timeout: REQUEST_TIMEOUT_MS, retryOptions: { attempts: 2, initialDelay: 1, maxDelay: 3 } },
+        });
         const ranked = rankModels(await listModels(ai));
         const candidates = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL, ...ranked.filter(n => n !== process.env.GEMINI_MODEL)] : ranked;
         if (!candidates.length) throw new Error("No Gemini text model available for this API key");
@@ -134,6 +150,13 @@ export function getChatModel(): Promise<ChatModel | null> {
     })();
   }
   return modelPromise;
+}
+
+/** Rejects with a "timed out" error if `work` takes longer than `ms`. */
+export function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`AI timed out after ${ms / 1000} s`)), ms); });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
 export async function llmStatus() {

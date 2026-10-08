@@ -18,7 +18,7 @@
  * Food safety: items the model scored as rotten are never turned into recipes.
  * Without GEMINI_API_KEY a plan is assembled directly from the retrieved documents (mode "offline").
  */
-import { getChatModel, type ChatModel } from "./llm";
+import { getChatModel, withDeadline, type ChatModel } from "./llm";
 import { queryRAGKnowledgeBase, type KnowledgeDocument } from "../lib/ragKnowledge";
 
 export interface ScanFacts {
@@ -43,11 +43,13 @@ export interface RescuePlan {
 export interface GenAIResult {
   mode: "llm" | "offline";
   model: string | null;
+  note?: string; // why the offline plan was used although Gemini is configured
   plan: RescuePlan;
   sources: { id: string; title: string; category: string }[];
 }
 
 const ROTTEN_BELOW = 0.15; // quality below this: compost only
+const PLAN_DEADLINE_MS = 45_000; // after this, show the knowledge-base plan instead
 
 const PLAN_SCHEMA = {
   type: "object",
@@ -108,12 +110,18 @@ export async function generateRescuePlan(f: ScanFacts, model?: ChatModel | null)
   ].join("\n");
   const context = docs.map((d, i) => `[S${i + 1}] ${d.title} (${d.category}): ${d.description} Steps: ${d.actionSteps.join("; ")}`).join("\n");
 
-  const plan = await llm.json<RescuePlan>({
-    system: SYSTEM,
-    prompt: `Scan facts:\n${facts}\n\nKnowledge base sources:\n${context || "(none)"}\n\nWrite the rescue plan.`,
-    schema: PLAN_SCHEMA,
-  });
-  return { mode: "llm", model: llm.name, plan: sanitize(plan, safe), sources };
+  try {
+    const plan = await withDeadline(llm.json<RescuePlan>({
+      system: SYSTEM,
+      prompt: `Scan facts:\n${facts}\n\nKnowledge base sources:\n${context || "(none)"}\n\nWrite the rescue plan.`,
+      schema: PLAN_SCHEMA,
+    }), PLAN_DEADLINE_MS);
+    return { mode: "llm", model: llm.name, plan: sanitize(plan, safe), sources };
+  } catch (e: any) {
+    // Gemini busy, slow or failing: never leave the user waiting, give the knowledge-base plan instead
+    console.warn("GenAI fell back to the offline plan:", e?.message);
+    return { mode: "offline", model: null, plan: offlinePlan(f, docs, safe), sources, note: "Gemini was busy or slow, so this plan comes straight from the knowledge base." };
+  }
 }
 
 /** Enforce the schema and the food-safety rule even if the model ignores them. */
