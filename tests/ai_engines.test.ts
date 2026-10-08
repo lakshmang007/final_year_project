@@ -130,3 +130,31 @@ test("a scan time in the future does not add shelf life", () => {
   const r = runTool("get_inventory", {}, { inventory: [{ id: "f", produceType: "banana", qualityScore: 0.5, rulHours: 20, timestamp: future }], actions: [] }) as any;
   assert.equal(r.items[0].hours_left, 20);
 });
+
+import { rankModels, isModelUnavailable, geminiChatModel } from "../src/ai_engines/llm";
+
+test("model ranking: newest stable flash first, no retired fixed list", () => {
+  const names = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-flash-latest", "gemini-3.9-flash-preview", "text-embedding-004"];
+  const r = rankModels(names);
+  assert.deepEqual(r.slice(0, 4), ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"]);
+  assert.ok(!r.includes("gemini-3.9-flash-preview") && !r.includes("text-embedding-004"));
+});
+
+test("a retired model makes the client switch to the next one and retry", async () => {
+  const tried: string[] = [];
+  const fakeAi: any = { models: { generateContent: async ({ model }: { model: string }) => {
+    tried.push(model);
+    if (model === "gemini-3.8-flash") throw Object.assign(new Error('{"error":{"code":404,"message":"This model models/gemini-3.8-flash is no longer available to new users."}}'), { status: 404 });
+    return { text: '{"ok":true}', candidates: [{ content: { role: "model", parts: [{ text: "hi" }] } }] };
+  } } };
+  const m = geminiChatModel(fakeAi, ["gemini-3.8-flash", "gemini-2.5-flash"]);
+  const out = await m.json<{ ok: boolean }>({ system: "", prompt: "x", schema: {} });
+  assert.deepEqual(tried, ["gemini-3.8-flash", "gemini-2.5-flash"]);
+  assert.equal(out.ok, true);
+  assert.equal(m.name, "gemini-2.5-flash");
+});
+
+test("other errors (e.g. quota) are not treated as a retired model", () => {
+  assert.equal(isModelUnavailable(new Error("429 RESOURCE_EXHAUSTED: quota exceeded")), false);
+  assert.equal(isModelUnavailable(new Error("models/x is not found for API version v1beta")), true);
+});

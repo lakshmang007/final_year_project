@@ -6,8 +6,9 @@
  * Agentic AI features. The API key is read from the server's environment variable
  * GEMINI_API_KEY and is never sent to the browser.
  *
- * Model names change over time (preview models are retired), so unless GEMINI_MODEL is set
- * we ask the API which models this key can use and pick the newest stable "flash" model.
+ * Model names change over time (Google retires models), so unless GEMINI_MODEL is set we ask
+ * the API which models this key can use, try the newest stable "flash" model first, and fall back
+ * to the next one if Google says a model is unavailable.
  *
  * Everything else in ai_engines talks to the `ChatModel` interface below, not to Gemini
  * directly, so the agent can also be tested with a scripted fake model (no key needed).
@@ -32,41 +33,66 @@ export interface ChatModel {
   json<T>(opts: { system: string; prompt: string; schema: object }): Promise<T>;
 }
 
-const PREFERRED = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"];
 let modelPromise: Promise<ChatModel | null> | null = null;
 let lastError = "";
 
-/** Newest stable flash model this key can call, e.g. "gemini-2.5-flash". */
-async function pickModel(ai: GoogleGenAI): Promise<string> {
-  if (process.env.GEMINI_MODEL) return process.env.GEMINI_MODEL;
+/**
+ * Text models this key can call, best first: stable "gemini-<version>-flash" models newest first
+ * (3.8 before 2.5), then "gemini-flash-latest", then any other flash text model. No fixed list of
+ * names: Google retires models (gemini-2.5-flash stopped serving new users), so we follow the API.
+ */
+export function rankModels(names: string[]): string[] {
+  const version = (n: string) => Number(/^gemini-(\d+(?:\.\d+)?)-flash$/.exec(n)?.[1]);
+  const stable = names.filter(n => Number.isFinite(version(n))).sort((a, b) => version(b) - version(a));
+  const latest = names.filter(n => n === "gemini-flash-latest");
+  const other = names.filter(n => n.includes("flash") && !/image|tts|live|embedding|audio|preview|exp/.test(n));
+  return [...new Set([...stable, ...latest, ...other])];
+}
+
+/** True when Google says this model can't be used (retired, not found, not for this key). */
+export function isModelUnavailable(e: any): boolean {
+  const msg = String(e?.message ?? e ?? "");
+  return e?.status === 404 || /\b404\b|NOT_FOUND|no longer available|not found|not supported for generateContent/i.test(msg);
+}
+
+async function listModels(ai: GoogleGenAI): Promise<string[]> {
   const names: string[] = [];
   const pager = await ai.models.list({ config: { pageSize: 200 } });
   for await (const m of pager) {
     if (m.name && (m.supportedActions ?? []).includes("generateContent")) names.push(m.name.replace(/^models\//, ""));
   }
-  for (const p of PREFERRED) if (names.includes(p)) return p;
-  const flash = names
-    .filter(n => /^gemini-[\d.]+-flash$/.test(n)) // stable flash only (no -lite, -preview, -exp, -tts, -image)
-    .sort((a, b) => parseFloat(b.split("-")[1]) - parseFloat(a.split("-")[1]));
-  if (flash.length) return flash[0];
-  const any = names.find(n => n.includes("flash") && !/image|tts|live|embedding/.test(n));
-  if (any) return any;
-  throw new Error("No Gemini text model available for this API key");
+  return names;
 }
 
-function geminiModel(ai: GoogleGenAI, name: string): ChatModel {
+/**
+ * A ChatModel over a ranked list of model names. If Google answers that a model is unavailable,
+ * it moves to the next one and retries, so a retired model never breaks the app.
+ */
+export function geminiChatModel(ai: Pick<GoogleGenAI, "models">, candidates: string[]): ChatModel {
+  let i = 0;
+  const call = async <R,>(fn: (model: string) => Promise<R>): Promise<R> => {
+    for (;;) {
+      try {
+        return await fn(candidates[i]);
+      } catch (e) {
+        if (!isModelUnavailable(e) || i >= candidates.length - 1) throw e;
+        console.warn(`Gemini model ${candidates[i]} unavailable, switching to ${candidates[i + 1]}`);
+        i++;
+      }
+    }
+  };
   return {
-    name,
+    get name() { return candidates[i]; },
     async chat({ system, history, tools }) {
-      const res = await ai.models.generateContent({
-        model: name,
+      const res = await call(model => ai.models.generateContent({
+        model,
         contents: history,
         config: {
           systemInstruction: system,
           temperature: 0.4,
           ...(tools?.length ? { tools: [{ functionDeclarations: tools }] } : {}),
         },
-      });
+      }));
       const content: Content = res.candidates?.[0]?.content ?? { role: "model", parts: [{ text: res.text ?? "" }] };
       return {
         text: res.text ?? "",
@@ -75,11 +101,11 @@ function geminiModel(ai: GoogleGenAI, name: string): ChatModel {
       };
     },
     async json<T>({ system, prompt, schema }: { system: string; prompt: string; schema: object }) {
-      const res = await ai.models.generateContent({
-        model: name,
+      const res = await call(model => ai.models.generateContent({
+        model,
         contents: prompt,
         config: { systemInstruction: system, temperature: 0.7, responseMimeType: "application/json", responseJsonSchema: schema },
-      });
+      }));
       return JSON.parse(res.text ?? "{}") as T;
     },
   };
@@ -95,9 +121,11 @@ export function getChatModel(): Promise<ChatModel | null> {
     modelPromise = (async () => {
       try {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const name = await pickModel(ai);
+        const ranked = rankModels(await listModels(ai));
+        const candidates = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL, ...ranked.filter(n => n !== process.env.GEMINI_MODEL)] : ranked;
+        if (!candidates.length) throw new Error("No Gemini text model available for this API key");
         lastError = "";
-        return geminiModel(ai, name);
+        return geminiChatModel(ai, candidates);
       } catch (e: any) {
         lastError = e?.message?.slice(0, 200) || "Could not connect to Gemini";
         modelPromise = null; // retry on the next request

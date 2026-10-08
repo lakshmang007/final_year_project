@@ -237,7 +237,7 @@ app.post("/api/genai/rescue-plan", aiRateLimit, async (req, res) => {
     }));
   } catch (error: any) {
     console.error("GenAI error:", error);
-    res.status(502).json({ error: "The AI could not generate a plan right now: " + (error.message || "unknown error").slice(0, 160) });
+    res.status(502).json({ error: "The AI could not generate a plan right now: " + (error.message || "unknown error").slice(0, 300) });
   }
 });
 
@@ -267,7 +267,7 @@ app.post("/api/agent/run", aiRateLimit, async (req, res) => {
     res.json(await runKitchenAgent(goal.trim().slice(0, 500), { inventory: items, weather: w, actions: [] }));
   } catch (error: any) {
     console.error("Agent error:", error);
-    res.status(502).json({ error: "The agent could not finish right now: " + (error.message || "unknown error").slice(0, 160) });
+    res.status(502).json({ error: "The agent could not finish right now: " + (error.message || "unknown error").slice(0, 300) });
   }
 });
 
